@@ -5,7 +5,7 @@ import { Music } from './music.js';
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.2.0';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -44,6 +44,7 @@ const ui = {
   openProject: null,
   newProject: false,
   showArchived: false,
+  editTask: null,
   musicOpen: false,
   themeDraft: null,
 };
@@ -322,7 +323,7 @@ function mtFinish(silent = false) {
     mtEndSession();
   } else {
     music.playAlarm().then(ok => { if (!ok) playMelody(); });
-    const task = dayRec(todayStr()).task;
+    const task = topTask(todayStr())?.text;
     notify('⏰ 타이머 종료', task ? `${task} — 설정한 시간이 됐어요.` : '설정한 시간이 됐어요.');
     try { navigator.vibrate?.([300, 150, 300]); } catch { /* 무시 */ }
   }
@@ -382,7 +383,7 @@ function pipBuild() {
   if (!pipWin) return;
   const d = pipWin.document;
   const c = { bg: cssVar('--bg'), track: cssVar('--surface-2'), accent: cssVar('--accent'), ink: cssVar('--accent-ink'), text: cssVar('--text'), muted: cssVar('--muted'), danger: cssVar('--danger') };
-  const rem = mtRemain(), ratio = mt.totalMs > 0 ? rem / mt.totalMs : 0, task = dayRec(todayStr()).task || '';
+  const rem = mtRemain(), ratio = mt.totalMs > 0 ? rem / mt.totalMs : 0, task = topTask(todayStr())?.text || '';
   d.title = '타이머';
   d.head.innerHTML = `<style>
     *{box-sizing:border-box} html,body{margin:0;height:100%}
@@ -540,16 +541,85 @@ function linkOptions(r, projects) {
   return html;
 }
 
-function taskFields(date, r) {
-  const b = f => `data-bind="days|${date}|${f}" data-key="days|${date}|${f}"`;
-  const projects = activeProjects();
-  return `<div class="fields">
-    <label class="field"><span>과제</span><input ${b('task')} value="${esc(r.task)}" placeholder="예: 보고서 서론 쓰기" maxlength="120" autocomplete="off"></label>
-    <label class="field"><span>첫 행동</span><input ${b('action')} value="${esc(r.action)}" placeholder="예: 문서 열고 첫 문장 쓰기" maxlength="120" autocomplete="off"></label>
-    <label class="field"><span>시작 시점</span><input ${b('cue')} value="${esc(r.cue)}" placeholder="예: 점심 먹고 책상에 앉으면" maxlength="120" autocomplete="off"></label>
-    ${projects.length ? `<label class="field"><span>장기 과제</span><select data-change="link" data-date="${date}" data-key="link|${date}">${linkOptions(r, projects)}</select></label>` : ''}
-  </div>
-  ${r.cue && r.action ? `<p class="plan-line"><span>${esc(r.cue)}</span><i>→</i><span>${esc(r.action)}</span></p>` : ''}`;
+/* ───────── 하루 과제 목록 (배열 순서 = 우선순위) ───────── */
+// 예전 버전(하루 과제 하나)으로 저장된 기록은 1순위 과제 하나로 읽어 옴
+function getTasks(s) {
+  const r = dayRec(s);
+  if (Array.isArray(r.tasks)) return r.tasks;
+  if (r.task) return [{ id: 'legacy', text: r.task, action: r.action || '', cue: r.cue || '', done: !!r.done, projectId: r.projectId || null, milestoneId: r.milestoneId || null }];
+  return [];
+}
+const topTask = s => getTasks(s).find(t => !t.done) || null;
+const setTasks = (s, tasks) => store.set('days', s, { tasks });
+const updateTask = (s, id, patch) => setTasks(s, getTasks(s).map(t => (t.id === id ? { ...t, ...patch } : t)));
+const carryTarget = s => (s < todayStr() ? todayStr() : addDays(s, 1));
+const carryLabel = s => (s < todayStr() ? '오늘로 가져오기' : s === todayStr() ? '내일로 넘기기' : '다음 날로 넘기기');
+
+function carryTasks(date, ids) {
+  if (!ids.length) return;
+  const target = carryTarget(date), src = getTasks(date), dest = getTasks(target);
+  const destIds = new Set(dest.map(t => t.id));
+  const moved = src.filter(t => ids.includes(t.id)).map(t => ({ ...t, id: destIds.has(t.id) ? uid() : t.id, from: date }));
+  setTasks(target, [...dest, ...moved]);
+  setTasks(date, src.filter(t => !ids.includes(t.id)));
+  ui.editTask = null;
+  toast(`${moved.length}개 과제를 ${target === todayStr() ? '오늘' : fmtMD(target)}로 옮겼습니다.`);
+}
+
+function dayTaskLabel(d) {
+  const list = getTasks(d), top = list.find(t => !t.done);
+  if (top) return esc(top.text) + (list.length > 1 ? ` <span class="muted">외 ${list.length - 1}개</span>` : '');
+  return list.length ? `<span class="muted">✓ ${list.length}개 모두 완료</span>` : '<span class="muted">—</span>';
+}
+
+function taskBlock(date) {
+  const tasks = getTasks(date), top = tasks.find(t => !t.done), projects = activeProjects();
+  const undone = tasks.filter(t => !t.done).length;
+  const field = (t, f, label, ph) => `<label class="field"><span>${label}</span><input data-tfield="${f}" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|${f}" value="${esc(t[f] || '')}" placeholder="${ph}" maxlength="120" autocomplete="off"></label>`;
+  const details = t => `<div class="fields">
+      ${field(t, 'text', '과제', '과제 이름')}
+      ${field(t, 'action', '첫 행동', '예: 문서 열고 첫 문장 쓰기')}
+      ${field(t, 'cue', '시작 시점', '예: 점심 먹고 책상에 앉으면')}
+      ${projects.length ? `<label class="field"><span>장기 과제</span><select data-change="tlink" data-date="${date}" data-id="${t.id}" data-key="tl|${date}|${t.id}">${linkOptions(t, projects)}</select></label>` : ''}
+    </div>
+    ${t.cue && t.action ? `<p class="plan-line"><span>${esc(t.cue)}</span><i>→</i><span>${esc(t.action)}</span></p>` : ''}`;
+  const focus = top
+    ? `<div class="now-task">
+        <div class="now-head"><span class="now-label">${date === todayStr() ? '지금 할 과제' : '먼저 할 과제'} · ${tasks.indexOf(top) + 1}순위</span><label class="check"><input type="checkbox" data-change="tdone" data-date="${date}" data-id="${top.id}" aria-label="지금 할 과제 완료"><span>완료</span></label></div>
+        ${details(top)}
+      </div>`
+    : tasks.length ? `<p class="all-done">✓ 모든 과제를 끝냈습니다</p>` : '';
+  const rows = tasks.map((t, i) => {
+    const editing = ui.editTask === `${date}|${t.id}`, isTop = t === top;
+    return `<li class="task-row ${t.done ? 'done' : ''} ${isTop ? 'is-top' : ''}">
+      <div class="tr-main">
+        <span class="rank">${i + 1}</span>
+        <input type="checkbox" data-change="tdone" data-date="${date}" data-id="${t.id}" ${t.done ? 'checked' : ''} aria-label="${esc(t.text)} 완료">
+        <span class="tr-text">${esc(t.text)}${t.from ? `<small class="muted"> · ${fmtMD(t.from)}에서 넘어옴</small>` : ''}</span>
+        <span class="tr-btns">
+          <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="우선순위 올리기">↑</button>
+          <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="1" ${i === tasks.length - 1 ? 'disabled' : ''} aria-label="우선순위 내리기">↓</button>
+          <button class="icon-btn sm ${editing ? 'on' : ''}" data-action="t-edit" data-date="${date}" data-id="${t.id}" aria-label="자세히" aria-expanded="${editing}">⋯</button>
+        </span>
+      </div>
+      ${editing ? `<div class="tr-edit">
+        ${isTop ? '' : details(t)}
+        <div class="btn-row wrap">
+          ${t.done ? '' : `<button class="btn sm" data-action="t-carry" data-date="${date}" data-id="${t.id}">${carryLabel(date)}</button>`}
+          <button class="btn sm danger" data-action="t-del" data-date="${date}" data-id="${t.id}">삭제</button>
+          <button class="btn sm" data-action="t-edit" data-date="${date}" data-id="${t.id}">닫기</button>
+        </div>
+      </div>` : ''}
+    </li>`;
+  }).join('');
+  return `${focus}
+    ${tasks.length ? `<div class="task-list-head"><span>우선순위</span>${undone ? `<button class="link-btn" data-action="t-carry-all" data-date="${date}">남은 ${undone}개 ${carryLabel(date)}</button>` : ''}</div>
+    <ol class="task-list">${rows}</ol>` : ''}
+    <div class="add-row">
+      <input id="t-new-${date}" data-enter="t-add" data-date="${date}" placeholder="${tasks.length ? '과제 추가 (맨 아래 순위로)' : '예: 보고서 서론 쓰기'}" maxlength="120" autocomplete="off" aria-label="과제 추가">
+      <button class="btn primary" data-action="t-add" data-date="${date}">추가</button>
+    </div>
+    ${tasks.length ? '' : `<p class="muted small">우선순위 순서대로 추가하세요. 맨 위의 끝나지 않은 과제가 '지금 할 과제'가 됩니다.</p>`}`;
 }
 
 /* ───────── 오늘(일) 화면 ───────── */
@@ -618,19 +688,15 @@ function viewDay() {
       <div class="${st.todayDone ? 'ok' : ''}"><b>${st.todayDone ? '✓' : '–'}</b><span>오늘 시작</span></div>
     </div>
     <article class="card">
-      <div class="card-head"><h2>${isToday ? '오늘의 과제' : '이 날의 과제'}</h2><span class="pill ${r.started ? 'on' : ''}">${r.started ? '시작함' : '시작 전'}</span></div>
-      ${taskFields(s, r)}
-      <div class="row-between">
-        <span class="muted small">${r.focusMin ? `집중 ${r.focusMin}분` : ''}</span>
-        <label class="check"><input type="checkbox" data-bind="days|${s}|done" data-key="days|${s}|done" ${r.done ? 'checked' : ''}><span>완료</span></label>
-      </div>
+      <div class="card-head"><h2>${isToday ? '오늘의 과제' : '이 날의 과제'}</h2><span class="head-right">${r.focusMin ? `<span class="muted small">집중 ${r.focusMin}분</span>` : ''}<span class="pill ${r.started ? 'on' : ''}">${r.started ? '시작함' : '시작 전'}</span></span></div>
+      ${taskBlock(s)}
     </article>
     ${isToday
       ? timerCard(r)
       : `<article class="card slim"><label class="check"><input type="checkbox" data-bind="days|${s}|started" data-key="days|${s}|started" ${r.started ? 'checked' : ''}><span>이 날 시작한 것으로 표시</span></label></article>`}
     ${isToday ? `<article class="card">
       <div class="card-head"><h2>내일 과제 정하기</h2><span class="muted small">${fmtMDW(tomorrow)}</span></div>
-      ${taskFields(tomorrow, dayRec(tomorrow))}
+      ${taskBlock(tomorrow)}
     </article>` : ''}
     ${upcomingCard(s)}
     ${weekGoalsMini(s)}
@@ -651,7 +717,7 @@ function viewWeek() {
     const evText = dayEv.map(e => (e.kind === 'deadline' ? `${esc(e.project)} 마감` : esc(e.title))).join(' · ');
     return `<li><button class="day-row ${d === t ? 'today' : ''}" data-action="goto-day" data-date="${d}">
       <span class="dr-date"><b>${DOW[parse(d).getDay()]}</b>${parse(d).getDate()}</span>
-      <span class="dr-main">${r.task ? esc(r.task) : '<span class="muted">—</span>'}${evText ? `<small>${evText}</small>` : ''}</span>
+      <span class="dr-main">${dayTaskLabel(d)}${evText ? `<small>${evText}</small>` : ''}</span>
       <span class="dr-side">${r.focusMin ? `<small class="muted">${r.focusMin}분</small>` : ''}<i class="dot ${r.started ? 'on' : d < t ? 'miss' : ''}" title="${r.started ? '시작함' : ''}"></i></span>
     </button></li>`;
   }).join('');
@@ -839,7 +905,7 @@ function musicCard() {
 function viewTimer() {
   const rem = mtRemain(), ratio = mt.totalMs > 0 ? rem / mt.totalMs : 0, run = mtRunning();
   const set = Math.round(mt.setMs / 1000), h = Math.floor(set / 3600), m = Math.floor((set % 3600) / 60), s = set % 60;
-  const task = dayRec(todayStr()).task;
+  const task = topTask(todayStr())?.text;
   const pipOk = 'documentPictureInPicture' in window;
   const fields = [['h', h, 23, '시간'], ['m', m, 59, '분'], ['s', s, 59, '초']]
     .map(([k, v, max, lb], i) => `${i ? '<span class="mt-colon">:</span>' : ''}<label class="mt-in"><input id="mt-${k}" type="number" inputmode="numeric" min="0" max="${max}" value="${v}" ${run ? 'disabled' : ''} data-mt-input aria-label="${lb}"><span>${lb}</span></label>`).join('');
@@ -1189,6 +1255,29 @@ const actions = {
   },
   'dismiss-error'() { store.clearError(); },
 
+  't-add'(el) {
+    const date = el.dataset.date, inp = document.getElementById(`t-new-${date}`), text = inp?.value.trim();
+    if (!text) { inp?.focus(); return; }
+    inp.value = '';
+    setTasks(date, [...getTasks(date), { id: uid(), text, action: '', cue: '', done: false, projectId: null, milestoneId: null }]);
+  },
+  't-move'(el) {
+    const { date, id } = el.dataset, list = [...getTasks(date)];
+    const i = list.findIndex(t => t.id === id), j = i + Number(el.dataset.dir);
+    if (i < 0 || j < 0 || j >= list.length) return;
+    [list[i], list[j]] = [list[j], list[i]];
+    setTasks(date, list);
+  },
+  't-edit'(el) { const k = `${el.dataset.date}|${el.dataset.id}`; ui.editTask = ui.editTask === k ? null : k; render(); },
+  't-del'(el) {
+    const { date, id } = el.dataset, t = getTasks(date).find(x => x.id === id);
+    if (!t || !confirm(`'${t.text}'을(를) 삭제할까요?`)) return;
+    ui.editTask = null;
+    setTasks(date, getTasks(date).filter(x => x.id !== id));
+  },
+  't-carry'(el) { carryTasks(el.dataset.date, [el.dataset.id]); },
+  't-carry-all'(el) { const date = el.dataset.date; carryTasks(date, getTasks(date).filter(t => !t.done).map(t => t.id)); },
+
   'mt-toggle'() { mtToggle(); },
   'mt-reset'() { mtReset(); },
   'mt-add'() { mtAdd(60); },
@@ -1218,14 +1307,18 @@ const actions = {
 };
 
 const changeActions = {
-  link(el) {
-    const date = el.dataset.date, [pid, mid] = el.value.split('::');
-    const patch = { projectId: pid || null, milestoneId: mid || null };
-    if (pid && !dayRec(date).task) {
-      const p = store.data.projects[pid], m = mid && (p?.milestones || []).find(x => x.id === mid);
-      patch.task = m ? m.title : p?.name || '';
-    }
-    store.set('days', date, patch);
+  tfield(el) {
+    const { date, id } = el.dataset, f = el.dataset.tfield, v = el.value.trim();
+    const t = getTasks(date).find(x => x.id === id);
+    if (!t) return;
+    if (f === 'text' && !v) { render(); return; } // 과제 이름은 비울 수 없음
+    if ((t[f] || '') === v) return;
+    updateTask(date, id, { [f]: v });
+  },
+  tdone(el) { updateTask(el.dataset.date, el.dataset.id, { done: el.checked }); },
+  tlink(el) {
+    const { date, id } = el.dataset, [pid, mid] = el.value.split('::');
+    updateTask(date, id, { projectId: pid || null, milestoneId: mid || null });
   },
   'goal-toggle'(el) { updateGoals(el.dataset.w, g => g.map(x => (x.id === el.dataset.id ? { ...x, done: el.checked } : x))); },
   'ms-toggle'(el) { updateMs(el.dataset.p, el.dataset.m, { done: el.checked }); },
@@ -1244,6 +1337,7 @@ $app.addEventListener('change', e => {
   if (el.id === 'music-file') { if (el.files?.length) music.add([...el.files]); el.value = ''; return; }
   if (el.dataset.color) { commitThemeDraft(); return; }
   if ('mtInput' in el.dataset) return;
+  if (el.dataset.tfield) { changeActions.tfield(el); return; }
   if (el.dataset.bind) {
     const [col, id, field] = el.dataset.bind.split('|');
     const v = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) || 0 : el.value.trim();
@@ -1266,7 +1360,7 @@ $app.addEventListener('keydown', e => {
   if (e.key !== 'Enter' || e.isComposing) return;
   const el = e.target;
   if (el.dataset.enter) { e.preventDefault(); actions[el.dataset.enter]?.(el); }
-  else if (el.dataset.bind && el.tagName === 'INPUT') { e.preventDefault(); el.blur(); }
+  else if ((el.dataset.bind || el.dataset.tfield) && el.tagName === 'INPUT') { e.preventDefault(); el.blur(); }
 });
 
 $app.addEventListener('submit', e => {
