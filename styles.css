@@ -477,3 +477,4 @@ input[type=range]:focus { background: transparent; }
   .cal-tasks i.done { text-decoration: line-through; opacity: .6; }
   .cal-marks { position: static; margin-top: auto; padding-top: 4px; }
 }
+.chip-btn.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }

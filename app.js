@@ -5,7 +5,7 @@ import { Music } from './music.js';
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.2.2';
+const APP_VERSION = '1.3.0';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -363,16 +363,16 @@ function updateTitle(startText) {
   if (document.title !== t) document.title = t;
 }
 
-/* 미니 창(Document Picture-in-Picture, 크롬 계열 전용) */
+/* 미션 창(Document Picture-in-Picture, 크롬 계열 전용) — 오늘 과제 목록 + 작은 타이머 */
 let pipWin = null;
 const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 async function togglePip() {
-  if (!('documentPictureInPicture' in window)) { toast('이 브라우저에서는 미니 창을 쓸 수 없습니다.'); return; }
+  if (!('documentPictureInPicture' in window)) { toast('이 브라우저에서는 미션 창을 쓸 수 없습니다.'); return; }
   if (pipWin) { pipWin.close(); pipWin = null; scheduleRender(); return; }
   try {
-    pipWin = await window.documentPictureInPicture.requestWindow({ width: 280, height: 360 });
+    pipWin = await window.documentPictureInPicture.requestWindow({ width: 300, height: 420 });
   } catch {
-    toast('미니 창을 열 수 없었습니다.');
+    toast('미션 창을 열 수 없었습니다.');
     return;
   }
   pipWin.addEventListener('pagehide', () => { pipWin = null; scheduleRender(); });
@@ -382,38 +382,95 @@ async function togglePip() {
 function pipBuild() {
   if (!pipWin) return;
   const d = pipWin.document;
-  const c = { bg: cssVar('--bg'), track: cssVar('--surface-2'), accent: cssVar('--accent'), ink: cssVar('--accent-ink'), text: cssVar('--text'), muted: cssVar('--muted'), danger: cssVar('--danger') };
-  const rem = mtRemain(), ratio = mt.totalMs > 0 ? rem / mt.totalMs : 0, task = topTask(todayStr())?.text || '';
-  d.title = '타이머';
+  const c = {
+    bg: cssVar('--bg'), s2: cssVar('--surface-2'), line: cssVar('--line'), accent: cssVar('--accent'), soft: cssVar('--accent-soft'),
+    ink: cssVar('--accent-ink'), text: cssVar('--text'), muted: cssVar('--muted'), warm: cssVar('--warm'), danger: cssVar('--danger'),
+  };
+  const today = todayStr(), tasks = getTasks(today), top = tasks.find(t => !t.done), doneN = tasks.filter(t => t.done).length;
+  const rem = mtRemain(), ratio = mt.totalMs > 0 ? rem / mt.totalMs : 0, run = mtRunning();
+  const scroll = d.getElementById('plist')?.scrollTop || 0;
+  d.title = '오늘의 미션';
   d.head.innerHTML = `<style>
     *{box-sizing:border-box} html,body{margin:0;height:100%}
-    body{background:${c.bg};color:${c.text};font-family:-apple-system,"Apple SD Gothic Neo","Noto Sans KR",system-ui,sans-serif;display:flex;flex-direction:column;user-select:none;overflow:hidden}
-    .task{padding:12px 14px 0;font-size:13px;color:${c.muted};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
-    .task b{color:${c.text};font-weight:600}
-    .ring{flex:1;min-height:0;position:relative}
-    .ring>svg{position:absolute;inset:8px;width:calc(100% - 16px);height:calc(100% - 16px)}
-    button svg{flex:none}
-    .btns{display:flex;gap:14px;justify-content:center;align-items:center;padding:4px 8px 14px}
-    button{border-radius:50%;border:1px solid ${c.track};background:${c.track};color:${c.text};display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;font:700 12px system-ui,sans-serif}
-    button.sm{width:40px;height:40px} button.main{width:52px;height:52px;background:${c.accent};color:${c.ink};border-color:${c.accent}}
+    body{background:${c.bg};color:${c.text};font:13px/1.4 -apple-system,"Apple SD Gothic Neo","Noto Sans KR",system-ui,sans-serif;display:flex;flex-direction:column;user-select:none;overflow:hidden}
+    header{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:10px 12px 7px;border-bottom:1px solid ${c.line}}
+    .ttl{font-size:11px;font-weight:800;letter-spacing:.16em;color:${c.accent}}
+    .cnt{font-size:12px;color:${c.muted};font-variant-numeric:tabular-nums}
+    .list{flex:1;min-height:0;overflow-y:auto;padding:6px 8px 8px}
+    ol{list-style:none;margin:0;padding:0}
+    .q{width:100%;display:flex;align-items:flex-start;gap:8px;border:0;background:none;color:inherit;text-align:left;padding:5px 6px;border-radius:7px;cursor:pointer;font:inherit}
+    .q:hover{background:${c.s2}}
+    .q.top{background:${c.soft}}
+    .box{flex:none;width:15px;height:15px;margin-top:2px;border:1.5px solid ${c.muted};border-radius:4px;display:grid;place-items:center;font-size:10px;font-weight:900;color:${c.ink}}
+    .q.top .box{border-color:${c.accent}}
+    .q.top .qt{font-weight:700}
+    .q.done .box{background:${c.accent};border-color:${c.accent}}
+    .q.done .qt{color:${c.muted};text-decoration:line-through}
+    .qt{word-break:keep-all;overflow-wrap:anywhere}
+    .empty{color:${c.muted};margin:0;padding:8px 6px}
+    .proj{margin-top:6px;padding:6px 0 0;border-top:1px dashed ${c.line}}
+    .pj{display:flex;gap:6px;align-items:flex-start;padding:3px 6px;font-size:12px;color:${c.muted}}
+    .pj b{color:${c.text};font-weight:600}
+    .pj .mk{color:${c.warm};flex:none}
+    .pj .dd{margin-left:auto;padding-left:6px;white-space:nowrap;color:${c.warm};font-weight:700}
+    .pj.late .dd{color:${c.danger}}
+    .tm{border-top:1px solid ${c.line};padding:8px 10px 10px}
+    .bar{height:4px;background:${c.s2};border-radius:9px;overflow:hidden;margin-bottom:8px}
+    .bar i{display:block;height:100%;background:${c.accent};transition:width .3s linear}
+    .bar.done i{background:${c.danger}}
+    .trow{display:flex;align-items:center;gap:8px}
+    .tnum{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+    .compact .tnum{font-size:16px}
+    .tlabel{font-size:11px;color:${c.muted};letter-spacing:.08em}
+    .tbtns{margin-left:auto;display:flex;align-items:center;gap:6px}
+    .rb{width:32px;height:32px;border-radius:50%;border:1px solid ${c.line};background:${c.s2};color:${c.text};display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;font:700 11px system-ui,sans-serif}
+    .rb.main{width:38px;height:38px;background:${c.accent};border-color:${c.accent};color:${c.ink}}
+    .rb svg{width:16px;height:16px;flex:none}
+    .alarm b{color:${c.danger}}
+    .pills{display:flex;gap:6px;margin-top:8px}
+    .pill{flex:1;border:1px solid ${c.line};background:${c.s2};color:${c.text};border-radius:9px;padding:7px 6px;cursor:pointer;font:700 12px -apple-system,"Noto Sans KR",system-ui,sans-serif}
+    .pill.main{background:${c.accent};border-color:${c.accent};color:${c.ink}}
   </style>`;
-  d.body.innerHTML = `<div class="task">${task ? `<b>${esc(task)}</b>` : '오늘 과제 없음'}</div>
-    <div class="ring"><svg viewBox="0 0 256 256" preserveAspectRatio="xMidYMid meet">
-      <g transform="rotate(-90 128 128)">
-        <circle cx="128" cy="128" r="${MT_R}" fill="none" stroke="${c.track}" stroke-width="10"/>
-        <circle id="pr" cx="128" cy="128" r="${MT_R}" fill="none" stroke="${mt.status === 'done' ? c.danger : c.accent}" stroke-width="10" stroke-linecap="round" stroke-dasharray="${MT_C}" style="stroke-dashoffset:${MT_C * (1 - ratio)};transition:stroke-dashoffset .3s linear"/>
-      </g>
-      <text id="pt" x="128" y="126" font-size="46" font-weight="600" fill="${c.text}" text-anchor="middle" dominant-baseline="middle" style="font-variant-numeric:tabular-nums">${fmtClock(rem)}</text>
-      <text id="ps" x="128" y="168" font-size="13" fill="${c.muted}" text-anchor="middle" dominant-baseline="middle" letter-spacing="2">${MT_LABEL[mt.status]}</text>
-    </svg></div>
-    <div class="btns">
-      <button class="sm" id="pReset" title="리셋">${ICON_RESET}</button>
-      <button class="main" id="pMain" title="시작/일시정지">${mtRunning() ? ICON_PAUSE : ICON_PLAY}</button>
-      <button class="sm" id="pAdd" title="1분 추가">+1m</button>
-    </div>`;
-  d.getElementById('pReset').onclick = () => mtReset();
-  d.getElementById('pMain').onclick = () => mtToggle();
-  d.getElementById('pAdd').onclick = () => mtAdd(60);
+
+  const rows = tasks.map(t => `<li><button class="q ${t.done ? 'done' : ''} ${t === top ? 'top' : ''}" data-id="${t.id}" title="${t.done ? '완료 취소' : '완료로 표시'}"><span class="box">${t.done ? '✓' : ''}</span><span class="qt">${esc(t.text)}</span></button></li>`).join('');
+  const proj = activeProjects()
+    .map(p => ({ p, next: sortedMs(p).find(m => !m.done) }))
+    .filter(x => x.next || x.p.deadline)
+    .sort((a, b) => (a.next?.due || a.p.deadline).localeCompare(b.next?.due || b.p.deadline))
+    .map(({ p, next }) => next
+      ? `<div class="pj ${next.due < today ? 'late' : ''}"><span class="mk">◆</span><span><b>${esc(p.name)}</b> · ${esc(next.title)} (${fmtMD(next.due)})</span><span class="dd">${next.due < today ? '지남' : dday(next.due)}</span></div>`
+      : `<div class="pj"><span class="mk">◆</span><span><b>${esc(p.name)}</b> · 모든 단계 완료</span><span class="dd">마감 ${dday(p.deadline)}</span></div>`)
+    .join('');
+
+  let timerHtml;
+  if (mt.alarm) {
+    const min = Math.round(mtSession() / 60000);
+    timerHtml = `<div class="tm alarm"><div class="trow"><b>⏰ 타이머 종료</b>${min >= 1 ? `<span class="tlabel">${min}분 집중</span>` : ''}</div>
+      <div class="pills">${min >= 1 ? '<button class="pill main" id="pRec">기록하고 닫기</button><button class="pill" id="pNo">기록 없이</button>' : '<button class="pill main" id="pNo">확인</button>'}</div></div>`;
+  } else if (mt.status === 'ready') {
+    timerHtml = `<div class="tm compact trow"><span class="tlabel">타이머</span><span class="tnum" id="pt">${fmtClock(rem)}</span><span class="tbtns"><button class="rb main" id="pMain" title="시작">${ICON_PLAY}</button></span></div>`;
+  } else {
+    timerHtml = `<div class="tm"><div class="bar ${mt.status === 'done' ? 'done' : ''}"><i id="pbar" style="width:${(ratio * 100).toFixed(2)}%"></i></div>
+      <div class="trow"><span class="tnum" id="pt">${fmtClock(rem)}</span><span class="tlabel" id="ps">${MT_LABEL[mt.status]}</span>
+        <span class="tbtns"><button class="rb" id="pReset" title="리셋">${ICON_RESET}</button><button class="rb main" id="pMain" title="${run ? '일시정지' : '시작'}">${run ? ICON_PAUSE : ICON_PLAY}</button><button class="rb" id="pAdd" title="1분 추가">+1m</button></span></div></div>`;
+  }
+
+  d.body.innerHTML = `<header><span class="ttl">오늘의 미션</span><span class="cnt">${tasks.length ? `${doneN}/${tasks.length} 완료` : fmtMDW(today)}</span></header>
+    <div class="list" id="plist">${tasks.length ? `<ol>${rows}</ol>` : '<p class="empty">오늘 과제가 없습니다. 플래너에서 추가하면 여기에 표시됩니다.</p>'}${proj ? `<div class="proj">${proj}</div>` : ''}</div>
+    ${timerHtml}`;
+  d.getElementById('plist').scrollTop = scroll;
+  d.querySelectorAll('.q').forEach(b => {
+    b.onclick = () => {
+      const t = getTasks(todayStr()).find(x => x.id === b.dataset.id);
+      if (t) updateTask(todayStr(), t.id, { done: !t.done });
+    };
+  });
+  const on = (id, fn) => { const el = d.getElementById(id); if (el) el.onclick = fn; };
+  on('pMain', () => mtToggle());
+  on('pReset', () => mtReset());
+  on('pAdd', () => mtAdd(60));
+  on('pRec', () => mtDismiss(true));
+  on('pNo', () => mtDismiss(false));
 }
 const pipRefresh = () => { if (pipWin) pipBuild(); };
 function pipUpdate(txt, ratio) {
@@ -421,8 +478,8 @@ function pipUpdate(txt, ratio) {
   const d = pipWin.document;
   const pt = d.getElementById('pt');
   if (pt) pt.textContent = txt;
-  const pr = d.getElementById('pr');
-  if (pr) pr.style.strokeDashoffset = String(MT_C * (1 - ratio));
+  const pb = d.getElementById('pbar');
+  if (pb) pb.style.width = `${(ratio * 100).toFixed(2)}%`;
   const ps = d.getElementById('ps');
   if (ps) ps.textContent = MT_LABEL[mt.status];
 }
@@ -700,7 +757,7 @@ function viewDay() {
       <div class="${st.todayDone ? 'ok' : ''}"><b>${st.todayDone ? '✓' : '–'}</b><span>오늘 시작</span></div>
     </div>
     <article class="card">
-      <div class="card-head"><h2>${isToday ? '오늘의 과제' : '이 날의 과제'}</h2><span class="head-right">${r.focusMin ? `<span class="muted small">집중 ${r.focusMin}분</span>` : ''}<span class="pill ${r.started ? 'on' : ''}">${r.started ? '시작함' : '시작 전'}</span></span></div>
+      <div class="card-head"><h2>${isToday ? '오늘의 과제' : '이 날의 과제'}</h2><span class="head-right">${r.focusMin ? `<span class="muted small">집중 ${r.focusMin}분</span>` : ''}${isToday && 'documentPictureInPicture' in window ? `<button class="chip-btn ${pipWin ? 'on' : ''}" data-action="mt-pip">${pipWin ? '미션 창 닫기' : '미션 창'}</button>` : ''}<span class="pill ${r.started ? 'on' : ''}">${r.started ? '시작함' : '시작 전'}</span></span></div>
       ${taskBlock(s)}
     </article>
     ${isToday
@@ -924,8 +981,8 @@ function viewTimer() {
     .map(([k, v, max, lb], i) => `${i ? '<span class="mt-colon">:</span>' : ''}<label class="mt-in"><input id="mt-${k}" type="number" inputmode="numeric" min="0" max="${max}" value="${v}" ${run ? 'disabled' : ''} data-mt-input aria-label="${lb}"><span>${lb}</span></label>`).join('');
   return `<section class="view">
     <header class="vhead plain">
-      <div class="vtitle"><h1>타이머</h1><span class="sub">${task ? `오늘: ${esc(task)}` : '오늘 과제를 정하면 여기와 미니 창에 표시됩니다'}</span></div>
-      ${pipOk ? `<button class="btn ${pipWin ? 'primary' : ''}" data-action="mt-pip">${pipWin ? '미니 창 닫기' : '미니 창'}</button>` : ''}
+      <div class="vtitle"><h1>타이머</h1><span class="sub">${task ? `오늘: ${esc(task)}` : '오늘 과제를 정하면 여기와 미션 창에 표시됩니다'}</span></div>
+      ${pipOk ? `<button class="btn ${pipWin ? 'primary' : ''}" data-action="mt-pip">${pipWin ? '미션 창 닫기' : '미션 창'}</button>` : ''}
     </header>
     ${mt.offer ? offerCard() : ''}
     <article class="card mt-card">
@@ -979,7 +1036,7 @@ function colorCard() {
     <div class="theme-row">${PRESETS.map(p => `<button class="theme-chip ${same(p) ? 'active' : ''}" data-action="theme-preset" data-id="${p.id}" style="--c-bg:${rgb(p.bg)};--c-ac:${rgb(p.accent)}"><i></i><span>${p.label}</span></button>`).join('')}</div>
     <div class="color-editors">${COLOR_DEFS.map(d => colorEditor(d, th[d.id])).join('')}</div>
     ${custom ? `<div class="btn-row"><button class="btn" data-action="theme-auto">기본값(라이트·다크 자동)으로 되돌리기</button></div>` : ''}
-    <p class="muted small">플래너·타이머·미니 창 전체에 적용되고, 같은 계정으로 로그인한 기기에도 동기화됩니다.</p>
+    <p class="muted small">플래너·타이머·미션 창 전체에 적용되고, 같은 계정으로 로그인한 기기에도 동기화됩니다.</p>
   </article>`;
 }
 
@@ -1406,6 +1463,7 @@ setInterval(() => {
   if (ui.month === lastToday.slice(0, 7)) ui.month = t.slice(0, 7);
   lastToday = t;
   scheduleRender();
+  pipRefresh();
 }, 30000);
 
 setInterval(tick, 250);
