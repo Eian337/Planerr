@@ -449,9 +449,31 @@ input[type=range]:focus { background: transparent; }
 .task-row.is-top .tr-text { font-weight: 700; }
 .tr-text small { font-weight: 400; font-size: 12px; }
 .tr-text { overflow: hidden; }
-.tr-memo { display: block; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tr-memo { display: block; color: var(--muted); white-space: pre-wrap; }
 .task-row.done .tr-text { color: var(--muted); text-decoration: line-through; }
 .tr-btns { display: flex; }
 .icon-btn.sm.on { background: var(--surface-2); color: var(--text); }
 .tr-edit { padding: 4px 0 12px 26px; }
 .tr-edit .fields { margin-bottom: 2px; }
+
+/* ── 주·달 화면: 과제 전체 표시 ── */
+.mini-tasks { display: flex; flex-direction: column; gap: 2px; margin: 1px 0; }
+.mini-item { display: flex; gap: 6px; align-items: baseline; font-size: 14px; }
+.mini-item .rk { font-size: 11.5px; font-weight: 800; color: var(--muted); min-width: 12px; text-align: right; font-variant-numeric: tabular-nums; flex: none; }
+.mini-item.done .mini-text { color: var(--muted); text-decoration: line-through; }
+.cal-tasks { display: none; }
+.ml-day + .ml-day { border-top: 1px solid var(--line); }
+.ml-day { padding: 8px 0; }
+.ml-date { border: 0; background: none; padding: 0 0 4px; font-weight: 700; font-size: 13.5px; color: var(--text); }
+.ml-date.today { color: var(--accent); }
+@media (min-width: 760px) {
+  .main.wide { max-width: 1080px; }
+  .month-list { display: none; }
+  .cal-cell { aspect-ratio: auto; min-height: 96px; flex-direction: column; align-items: stretch; justify-content: flex-start; padding: 6px 7px; text-align: left; }
+  .cal-cell.blank { min-height: 0; }
+  .cal-cell .n { font-size: 13px; }
+  .cal-tasks { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
+  .cal-tasks i { font-style: normal; font-size: 11.5px; line-height: 1.3; font-weight: 500; overflow-wrap: anywhere; }
+  .cal-tasks i.done { text-decoration: line-through; opacity: .6; }
+  .cal-marks { position: static; margin-top: auto; padding-top: 4px; }
+}

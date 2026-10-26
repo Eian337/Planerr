@@ -5,7 +5,7 @@ import { Music } from './music.js';
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.2.2';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -550,7 +550,6 @@ function getTasks(s) {
   if (r.task) return [{ id: 'legacy', text: r.task, memo: r.action || '', cue: r.cue || '', done: !!r.done, projectId: r.projectId || null, milestoneId: r.milestoneId || null }];
   return [];
 }
-const memoLine = t => (t.memo || '').split('\n')[0];
 const topTask = s => getTasks(s).find(t => !t.done) || null;
 const setTasks = (s, tasks) => store.set('days', s, { tasks });
 const updateTask = (s, id, patch) => setTasks(s, getTasks(s).map(t => (t.id === id ? { ...t, ...patch } : t)));
@@ -568,10 +567,20 @@ function carryTasks(date, ids) {
   toast(`${moved.length}개 과제를 ${target === todayStr() ? '오늘' : fmtMD(target)}로 옮겼습니다.`);
 }
 
-function dayTaskLabel(d) {
-  const list = getTasks(d), top = list.find(t => !t.done);
-  if (top) return esc(top.text) + (list.length > 1 ? ` <span class="muted">외 ${list.length - 1}개</span>` : '');
-  return list.length ? `<span class="muted">✓ ${list.length}개 모두 완료</span>` : '<span class="muted">—</span>';
+// 그날 과제 전체를 우선순위 순서대로(완료한 과제는 줄 그어서)
+function miniTasks(d) {
+  const list = getTasks(d);
+  if (!list.length) return '<span class="muted">—</span>';
+  return `<span class="mini-tasks">${list.map((t, i) => `<span class="mini-item ${t.done ? 'done' : ''}"><span class="rk">${i + 1}</span><span class="mini-text">${esc(t.text)}</span></span>`).join('')}</span>`;
+}
+
+function monthTaskList(first, last) {
+  const days = Object.keys(store.data.days).filter(k => k >= first && k <= last && getTasks(k).length).sort();
+  if (!days.length) return '';
+  return `<article class="card month-list">
+    <div class="card-head"><h2>이 달의 과제</h2></div>
+    ${days.map(d => `<div class="ml-day"><button class="ml-date ${d === todayStr() ? 'today' : ''}" data-action="goto-day" data-date="${d}">${fmtMDW(d)}</button>${miniTasks(d)}</div>`).join('')}
+  </article>`;
 }
 
 function taskBlock(date) {
@@ -598,7 +607,7 @@ function taskBlock(date) {
       <div class="tr-main">
         <span class="rank">${i + 1}</span>
         <input type="checkbox" data-change="tdone" data-date="${date}" data-id="${t.id}" ${t.done ? 'checked' : ''} aria-label="${esc(t.text)} 완료">
-        <span class="tr-text">${esc(t.text)}${t.from ? `<small class="muted"> · ${fmtMD(t.from)}에서 넘어옴</small>` : ''}${memoLine(t) && !isTop && !editing ? `<small class="tr-memo">${esc(memoLine(t))}</small>` : ''}</span>
+        <span class="tr-text">${esc(t.text)}${t.from ? `<small class="muted"> · ${fmtMD(t.from)}에서 넘어옴</small>` : ''}${t.memo && !isTop && !editing ? `<small class="tr-memo">${esc(t.memo)}</small>` : ''}</span>
         <span class="tr-btns">
           <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="우선순위 올리기">↑</button>
           <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="1" ${i === tasks.length - 1 ? 'disabled' : ''} aria-label="우선순위 내리기">↓</button>
@@ -665,7 +674,7 @@ function upcomingCard(s) {
   if (!ev.length) return '';
   return `<article class="card">
     <div class="card-head"><h2>다가오는 일정</h2><span class="muted small">2주 이내</span></div>
-    <ul class="ev-list">${ev.slice(0, 8).map(evItem).join('')}</ul>
+    <ul class="ev-list">${ev.map(evItem).join('')}</ul>
   </article>`;
 }
 
@@ -720,7 +729,7 @@ function viewWeek() {
     const evText = dayEv.map(e => (e.kind === 'deadline' ? `${esc(e.project)} 마감` : esc(e.title))).join(' · ');
     return `<li><button class="day-row ${d === t ? 'today' : ''}" data-action="goto-day" data-date="${d}">
       <span class="dr-date"><b>${DOW[parse(d).getDay()]}</b>${parse(d).getDate()}</span>
-      <span class="dr-main">${dayTaskLabel(d)}${evText ? `<small>${evText}</small>` : ''}</span>
+      <span class="dr-main">${miniTasks(d)}${evText ? `<small>${evText}</small>` : ''}</span>
       <span class="dr-side">${r.focusMin ? `<small class="muted">${r.focusMin}분</small>` : ''}<i class="dot ${r.started ? 'on' : d < t ? 'miss' : ''}" title="${r.started ? '시작함' : ''}"></i></span>
     </button></li>`;
   }).join('');
@@ -761,7 +770,7 @@ function viewMonth() {
     if (started) startedN++;
     const de = ev.filter(e => e.date === ds);
     const marks = de.length ? `<span class="cal-marks">${de.slice(0, 3).map(e => `<i class="mk-${e.kind}${e.done ? ' done' : ''}"></i>`).join('')}</span>` : '';
-    cells += `<button class="cal-cell ${started ? 'started' : ''} ${ds === t ? 'today' : ''} ${ds > t ? 'future' : ''}" data-action="goto-day" data-date="${ds}" aria-label="${m}월 ${d}일${started ? ', 시작함' : ''}"><span class="n">${d}</span>${marks}</button>`;
+    cells += `<button class="cal-cell ${started ? 'started' : ''} ${ds === t ? 'today' : ''} ${ds > t ? 'future' : ''}" data-action="goto-day" data-date="${ds}" aria-label="${m}월 ${d}일${started ? ', 시작함' : ''}"><span class="n">${d}</span>${getTasks(ds).length ? `<span class="cal-tasks">${getTasks(ds).map(x => `<i class="${x.done ? 'done' : ''}">${esc(x.text)}</i>`).join('')}</span>` : ''}${marks}</button>`;
   }
   return `<section class="view">
     ${dateHeader(`${y}년 ${m}월`, isCur ? '이번 달' : '', 'month', !isCur, '이번 달로')}
@@ -775,6 +784,7 @@ function viewMonth() {
       <div class="cal-grid">${cells}</div>
       <div class="cal-legend"><span><i class="lg lg-start"></i>시작한 날</span><span><i class="lg lg-ms"></i>중간 지점</span><span><i class="lg lg-dl"></i>공식 마감</span></div>
     </article>
+    ${monthTaskList(first, last)}
     ${ev.length ? `<article class="card"><div class="card-head"><h2>이 달의 일정</h2></div><ul class="ev-list">${ev.map(evItem).join('')}</ul></article>` : ''}
   </section>`;
 }
@@ -1075,7 +1085,7 @@ function shell() {
       ${tabs.map(([v, label]) => `<button class="tab ${ui.view === v ? 'active' : ''}" data-action="nav" data-view="${v}" ${ui.view === v ? 'aria-current="page"' : ''}>${ICON[v]}<span>${label}</span></button>`).join('')}
     </nav>
     ${s.error ? `<div class="banner" role="alert"><span>${esc(s.error)}</span><button class="link-btn" data-action="dismiss-error">닫기</button></div>` : ''}
-    <main class="main">${views[ui.view]()}</main>
+    <main class="main ${ui.view === 'month' ? 'wide' : ''}">${views[ui.view]()}</main>
     ${alarmOverlay()}
   </div>`;
 }
