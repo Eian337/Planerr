@@ -5,7 +5,7 @@ import { Music } from './music.js';
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.2.1';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -542,13 +542,15 @@ function linkOptions(r, projects) {
 }
 
 /* ───────── 하루 과제 목록 (배열 순서 = 우선순위) ───────── */
-// 예전 버전(하루 과제 하나)으로 저장된 기록은 1순위 과제 하나로 읽어 옴
+// 예전 버전(하루 과제 하나)으로 저장된 기록은 1순위 과제 하나로 읽어 옴.
+// 예전의 '첫 행동'(action)은 '뭘 할지' 메모(memo)로 읽음
 function getTasks(s) {
   const r = dayRec(s);
-  if (Array.isArray(r.tasks)) return r.tasks;
-  if (r.task) return [{ id: 'legacy', text: r.task, action: r.action || '', cue: r.cue || '', done: !!r.done, projectId: r.projectId || null, milestoneId: r.milestoneId || null }];
+  if (Array.isArray(r.tasks)) return r.tasks.map(t => (t.memo === undefined && t.action ? { ...t, memo: t.action } : t));
+  if (r.task) return [{ id: 'legacy', text: r.task, memo: r.action || '', cue: r.cue || '', done: !!r.done, projectId: r.projectId || null, milestoneId: r.milestoneId || null }];
   return [];
 }
+const memoLine = t => (t.memo || '').split('\n')[0];
 const topTask = s => getTasks(s).find(t => !t.done) || null;
 const setTasks = (s, tasks) => store.set('days', s, { tasks });
 const updateTask = (s, id, patch) => setTasks(s, getTasks(s).map(t => (t.id === id ? { ...t, ...patch } : t)));
@@ -576,17 +578,18 @@ function taskBlock(date) {
   const tasks = getTasks(date), top = tasks.find(t => !t.done), projects = activeProjects();
   const undone = tasks.filter(t => !t.done).length;
   const field = (t, f, label, ph) => `<label class="field"><span>${label}</span><input data-tfield="${f}" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|${f}" value="${esc(t[f] || '')}" placeholder="${ph}" maxlength="120" autocomplete="off"></label>`;
-  const details = t => `<div class="fields">
+  // 메모는 모든 과제에, 시작 시점은 맨 위 과제(지금 할 과제)에만
+  const details = (t, isTop) => `<div class="fields">
       ${field(t, 'text', '과제', '과제 이름')}
-      ${field(t, 'action', '첫 행동', '예: 문서 열고 첫 문장 쓰기')}
-      ${field(t, 'cue', '시작 시점', '예: 점심 먹고 책상에 앉으면')}
+      <label class="field"><span>뭘 할지</span><textarea rows="2" data-tfield="memo" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|memo" maxlength="500" placeholder="예: 문제집 42쪽부터 3문제 풀기">${esc(t.memo || '')}</textarea></label>
+      ${isTop ? field(t, 'cue', '시작 시점 (선택)', '예: 점심 먹고 책상에 앉으면') : ''}
       ${projects.length ? `<label class="field"><span>장기 과제</span><select data-change="tlink" data-date="${date}" data-id="${t.id}" data-key="tl|${date}|${t.id}">${linkOptions(t, projects)}</select></label>` : ''}
     </div>
-    ${t.cue && t.action ? `<p class="plan-line"><span>${esc(t.cue)}</span><i>→</i><span>${esc(t.action)}</span></p>` : ''}`;
+    ${isTop && t.cue ? `<p class="plan-line"><span>${esc(t.cue)}</span><i>→</i><span>${esc(t.text)}</span></p>` : ''}`;
   const focus = top
     ? `<div class="now-task">
         <div class="now-head"><span class="now-label">${date === todayStr() ? '지금 할 과제' : '먼저 할 과제'} · ${tasks.indexOf(top) + 1}순위</span><label class="check"><input type="checkbox" data-change="tdone" data-date="${date}" data-id="${top.id}" aria-label="지금 할 과제 완료"><span>완료</span></label></div>
-        ${details(top)}
+        ${details(top, true)}
       </div>`
     : tasks.length ? `<p class="all-done">✓ 모든 과제를 끝냈습니다</p>` : '';
   const rows = tasks.map((t, i) => {
@@ -595,7 +598,7 @@ function taskBlock(date) {
       <div class="tr-main">
         <span class="rank">${i + 1}</span>
         <input type="checkbox" data-change="tdone" data-date="${date}" data-id="${t.id}" ${t.done ? 'checked' : ''} aria-label="${esc(t.text)} 완료">
-        <span class="tr-text">${esc(t.text)}${t.from ? `<small class="muted"> · ${fmtMD(t.from)}에서 넘어옴</small>` : ''}</span>
+        <span class="tr-text">${esc(t.text)}${t.from ? `<small class="muted"> · ${fmtMD(t.from)}에서 넘어옴</small>` : ''}${memoLine(t) && !isTop && !editing ? `<small class="tr-memo">${esc(memoLine(t))}</small>` : ''}</span>
         <span class="tr-btns">
           <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="우선순위 올리기">↑</button>
           <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="1" ${i === tasks.length - 1 ? 'disabled' : ''} aria-label="우선순위 내리기">↓</button>
@@ -603,7 +606,7 @@ function taskBlock(date) {
         </span>
       </div>
       ${editing ? `<div class="tr-edit">
-        ${isTop ? '' : details(t)}
+        ${isTop ? '' : details(t, false)}
         <div class="btn-row wrap">
           ${t.done ? '' : `<button class="btn sm" data-action="t-carry" data-date="${date}" data-id="${t.id}">${carryLabel(date)}</button>`}
           <button class="btn sm danger" data-action="t-del" data-date="${date}" data-id="${t.id}">삭제</button>
@@ -1259,7 +1262,7 @@ const actions = {
     const date = el.dataset.date, inp = document.getElementById(`t-new-${date}`), text = inp?.value.trim();
     if (!text) { inp?.focus(); return; }
     inp.value = '';
-    setTasks(date, [...getTasks(date), { id: uid(), text, action: '', cue: '', done: false, projectId: null, milestoneId: null }]);
+    setTasks(date, [...getTasks(date), { id: uid(), text, memo: '', cue: '', done: false, projectId: null, milestoneId: null }]);
   },
   't-move'(el) {
     const { date, id } = el.dataset, list = [...getTasks(date)];
