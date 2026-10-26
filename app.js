@@ -5,7 +5,7 @@ import { Music } from './music.js';
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -390,7 +390,8 @@ function pipBuild() {
     .task{padding:12px 14px 0;font-size:13px;color:${c.muted};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
     .task b{color:${c.text};font-weight:600}
     .ring{flex:1;min-height:0;position:relative}
-    svg{position:absolute;inset:8px;width:calc(100% - 16px);height:calc(100% - 16px)}
+    .ring>svg{position:absolute;inset:8px;width:calc(100% - 16px);height:calc(100% - 16px)}
+    button svg{flex:none}
     .btns{display:flex;gap:14px;justify-content:center;align-items:center;padding:4px 8px 14px}
     button{border-radius:50%;border:1px solid ${c.track};background:${c.track};color:${c.text};display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;font:700 12px system-ui,sans-serif}
     button.sm{width:40px;height:40px} button.main{width:52px;height:52px;background:${c.accent};color:${c.ink};border-color:${c.accent}}
