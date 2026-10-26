@@ -1,7 +1,11 @@
 // 학업 플래너 — 화면과 동작
 import { Store } from './store.js';
+import { applyTheme, cachedTheme, cacheTheme, PRESETS, COLOR_DEFS, rgb } from './theme.js';
+import { Music } from './music.js';
 
-const APP_VERSION = '1.0.0';
+applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
+
+const APP_VERSION = '1.1.0';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -40,6 +44,8 @@ const ui = {
   openProject: null,
   newProject: false,
   showArchived: false,
+  musicOpen: false,
+  themeDraft: null,
 };
 
 /* ───────── 데이터 조회 ───────── */
@@ -133,19 +139,19 @@ function chime() {
 }
 
 function tick() {
-  if (!timer) { if (document.title !== BASE_TITLE) document.title = BASE_TITLE; return; }
-  if (timer.phase === 'warm' && elapsed() >= timer.warmMs) {
+  if (mtRunning() && mtRemain() <= 0) mtFinish();
+  else updateMainTimerDom();
+  if (timer && timer.phase === 'warm' && elapsed() >= timer.warmMs) {
     timer.accMs = timer.warmMs; timer.segStart = null; timer.phase = 'prompt';
     if (document.hidden) timer.chimePending = true; else chime();
     saveTimer();
     scheduleRender();
-    return;
   }
   updateTimerDom();
 }
 
 function updateTimerDom() {
-  if (!timer) { document.title = BASE_TITLE; return; }
+  if (!timer) { updateTitle(); return; }
   const e = elapsed();
   let text;
   if (timer.phase === 'warm') {
@@ -162,7 +168,302 @@ function updateTimerDom() {
   if (disp) disp.textContent = text;
   const mini = document.getElementById('timer-mini-text');
   if (mini) mini.textContent = text;
-  document.title = `${text} · ${BASE_TITLE}`;
+  updateTitle(text);
+}
+
+/* ───────── 타이머 탭 (기존 Personal-Timer 기능 이식) ───────── */
+const fmtT = s => `${Math.floor(s / 60)}:${pad(Math.floor(s % 60))}`;
+const music = new Music({
+  onChange: () => scheduleRender(),
+  onTime: (cur, dur) => {
+    const ok = Number.isFinite(dur) && dur > 0;
+    const seek = document.getElementById('music-seek');
+    if (seek && ok && document.activeElement !== seek) seek.value = String(Math.round((cur / dur) * 1000));
+    const c = document.getElementById('music-cur');
+    if (c) c.textContent = fmtT(cur);
+    const d = document.getElementById('music-dur');
+    if (d && ok) d.textContent = fmtT(dur);
+  },
+  onError: msg => toast(msg),
+});
+
+const MKEY = 'planner.mtimer.v1';
+const MT_R = 108, MT_C = 2 * Math.PI * MT_R;
+const MT_DEFAULT = 5 * 60000;
+const MT_CAP = (23 * 3600 + 59 * 60 + 59) * 1000;
+const MT_LABEL = { ready: '준비', running: '진행 중', paused: '일시정지', done: '종료' };
+const mtFresh = () => ({ totalMs: MT_DEFAULT, remainMs: MT_DEFAULT, setMs: MT_DEFAULT, endTime: null, status: 'ready', accMs: 0, segStart: null, sessionDate: null, alarm: false, offer: null });
+let mt = (() => { try { return { ...mtFresh(), ...(JSON.parse(localStorage.getItem(MKEY)) || {}) }; } catch { return mtFresh(); } })();
+const mtSave = () => { try { localStorage.setItem(MKEY, JSON.stringify(mt)); } catch { /* 무시 */ } };
+const mtRunning = () => mt.status === 'running';
+const mtRemain = () => (mtRunning() ? Math.max(0, mt.endTime - Date.now()) : Math.max(0, mt.remainMs));
+const mtSession = () => mt.accMs + (mt.segStart ? Date.now() - mt.segStart : 0);
+const fmtClock = ms => {
+  const s = Math.max(0, Math.ceil(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h ? `${pad(h)}:${pad(m)}:${pad(s % 60)}` : `${pad(m)}:${pad(s % 60)}`;
+};
+const ICON_PLAY = '<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden="true"><path d="M8 5.14v13.72a1 1 0 0 0 1.54.84l10.3-6.86a1 1 0 0 0 0-1.68L9.54 4.3A1 1 0 0 0 8 5.14z"/></svg>';
+const ICON_PAUSE = '<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>';
+const ICON_RESET = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 2.6-6.4"/><path d="M3 4v4h4"/></svg>';
+
+function mtCloseSeg(until = Date.now()) {
+  if (mt.segStart) { mt.accMs += Math.max(0, until - mt.segStart); mt.segStart = null; }
+}
+function mtEndSession() { mt.accMs = 0; mt.segStart = null; mt.sessionDate = null; }
+
+// 기록할지 물어볼 시간을 쌓아 둠(같은 날짜면 합산). 1분 미만은 묻지 않음
+function mtOffer(ms, date) {
+  const min = Math.round(ms / 60000);
+  if (min < 1) return;
+  const d = date || todayStr();
+  mt.offer = { min: (mt.offer && mt.offer.date === d ? mt.offer.min : 0) + min, date: d };
+}
+
+function mtToggle() {
+  if (mtRunning()) {
+    mt.remainMs = mtRemain(); mt.endTime = null; mt.status = 'paused';
+    mtCloseSeg();
+  } else {
+    if (mt.remainMs <= 0) {
+      if (mt.setMs <= 0) { toast('시간을 먼저 정해 주세요.'); return; }
+      mt.totalMs = mt.setMs; mt.remainMs = mt.setMs;
+    }
+    ensureAudio(); music.unlock(); askNotify();
+    mtStopAlarm(); mt.alarm = false;
+    mt.endTime = Date.now() + mt.remainMs; mt.status = 'running'; mt.segStart = Date.now();
+    if (!mt.sessionDate) mt.sessionDate = todayStr();
+  }
+  mtSave(); scheduleRender(); pipRefresh();
+}
+
+function mtReset() {
+  mtStopAlarm();
+  mtOffer(mtSession(), mt.sessionDate);
+  mtEndSession();
+  const t = mt.setMs > 0 ? mt.setMs : MT_DEFAULT;
+  Object.assign(mt, { status: 'ready', endTime: null, alarm: false, totalMs: t, remainMs: t });
+  mtSave(); scheduleRender(); pipRefresh();
+}
+
+function mtAdd(sec) {
+  const add = sec * 1000;
+  if (mt.status === 'done') {
+    mtStopAlarm();
+    Object.assign(mt, { status: 'ready', alarm: false, totalMs: add, remainMs: add });
+  } else if (mtRunning()) {
+    const a = Math.min(add, Math.max(0, MT_CAP - mtRemain()));
+    mt.endTime += a; mt.totalMs += a;
+  } else {
+    mt.remainMs = Math.min(MT_CAP, mt.remainMs + add);
+    mt.totalMs = Math.min(MT_CAP, mt.totalMs + add);
+  }
+  mtSave(); scheduleRender(); pipRefresh();
+}
+
+// 진행 중이면 남은 시간에 더하고, 멈춘 상태면 표시된 시간에 더해 새로 맞춤(23:59:59까지)
+function mtPreset(min) {
+  if (mtRunning()) { mtAdd(min * 60); return; }
+  const ms = Math.min(Math.floor(mt.remainMs / 1000) * 1000 + min * 60000, MT_CAP);
+  mtStopAlarm();
+  Object.assign(mt, { status: 'ready', alarm: false, totalMs: ms, remainMs: ms, setMs: ms });
+  mtSave(); scheduleRender(); pipRefresh();
+}
+
+function mtFromInputs() {
+  if (mtRunning()) return;
+  const v = (id, max) => Math.min(max, Math.max(0, parseInt(document.getElementById(id)?.value, 10) || 0));
+  const ms = (v('mt-h', 23) * 3600 + v('mt-m', 59) * 60 + v('mt-s', 59)) * 1000;
+  const hadAlarm = mt.alarm;
+  if (hadAlarm) mtStopAlarm();
+  Object.assign(mt, { status: 'ready', alarm: false, totalMs: ms, remainMs: ms, setMs: ms });
+  mtSave(); updateMainTimerDom(); pipRefresh();
+  if (hadAlarm) scheduleRender();
+}
+
+let melody = [];
+function playMelody() {
+  ensureAudio();
+  if (!actx) return;
+  const t0 = actx.currentTime + 0.05;
+  melody = [[0, 880, 0.3], [0.38, 1047, 0.3], [0.76, 1175, 0.3], [1.3, 880, 0.3], [1.68, 1047, 0.3], [2.06, 1319, 0.55]].map(([t, f, d]) => {
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = 'sine'; o.frequency.value = f;
+    g.gain.setValueAtTime(0.32, t0 + t);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + t + d);
+    o.connect(g).connect(actx.destination);
+    o.start(t0 + t); o.stop(t0 + t + d + 0.05);
+    return o;
+  });
+}
+function mtStopAlarm() {
+  melody.forEach(o => { try { o.stop(); } catch { /* 이미 끝남 */ } });
+  melody = [];
+  music.stopAlarm();
+}
+
+function askNotify() {
+  try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch { /* 무시 */ }
+}
+async function notify(title, body) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    if (reg) { await reg.showNotification(title, { body, icon: './icons/icon-192.png', tag: 'planner-timer' }); return; }
+  } catch { /* 아래 방식으로 */ }
+  try { new Notification(title, { body }); } catch { /* 무시 */ }
+}
+
+// silent: 앱이 꺼져 있는 동안 끝난 경우(소리 없이 종료 처리하고 기록 여부만 물음)
+function mtFinish(silent = false) {
+  mtCloseSeg(mt.endTime || Date.now());
+  Object.assign(mt, { status: 'done', remainMs: 0, endTime: null, alarm: !silent });
+  if (silent) {
+    mtOffer(mtSession(), mt.sessionDate);
+    mtEndSession();
+  } else {
+    music.playAlarm().then(ok => { if (!ok) playMelody(); });
+    const task = dayRec(todayStr()).task;
+    notify('⏰ 타이머 종료', task ? `${task} — 설정한 시간이 됐어요.` : '설정한 시간이 됐어요.');
+    try { navigator.vibrate?.([300, 150, 300]); } catch { /* 무시 */ }
+  }
+  mtSave(); scheduleRender(); pipRefresh();
+}
+
+function mtDismiss(record) {
+  mtStopAlarm();
+  const min = Math.round(mtSession() / 60000), date = mt.sessionDate || todayStr();
+  if (record && min >= 1) recordFocus(min, date);
+  mtEndSession();
+  mt.alarm = false;
+  mtSave(); scheduleRender(); pipRefresh();
+}
+
+function recordFocus(min, date) {
+  const r = dayRec(date);
+  store.set('days', date, { focusMin: (r.focusMin || 0) + min, started: true, ...(r.startedAt ? {} : { startedAt: Date.now() }) });
+  toast(`${min}분을 ${date === todayStr() ? '오늘' : fmtMD(date)} 집중 시간에 기록했습니다.`);
+}
+
+function updateMainTimerDom() {
+  const rem = mtRemain(), txt = fmtClock(rem), ratio = mt.totalMs > 0 ? rem / mt.totalMs : 0;
+  const d = document.getElementById('mt-display');
+  if (d) d.textContent = txt;
+  const r = document.getElementById('mt-ring');
+  if (r) r.style.strokeDashoffset = String(MT_C * (1 - ratio));
+  const l = document.getElementById('mt-label');
+  if (l) l.textContent = MT_LABEL[mt.status];
+  const mini = document.getElementById('mt-mini-text');
+  if (mini) mini.textContent = txt;
+  pipUpdate(txt, ratio);
+}
+
+function updateTitle(startText) {
+  const t = startText ? `${startText} · ${BASE_TITLE}` : mtRunning() ? `${fmtClock(mtRemain())} · 타이머` : BASE_TITLE;
+  if (document.title !== t) document.title = t;
+}
+
+/* 미니 창(Document Picture-in-Picture, 크롬 계열 전용) */
+let pipWin = null;
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+async function togglePip() {
+  if (!('documentPictureInPicture' in window)) { toast('이 브라우저에서는 미니 창을 쓸 수 없습니다.'); return; }
+  if (pipWin) { pipWin.close(); pipWin = null; scheduleRender(); return; }
+  try {
+    pipWin = await window.documentPictureInPicture.requestWindow({ width: 280, height: 360 });
+  } catch {
+    toast('미니 창을 열 수 없었습니다.');
+    return;
+  }
+  pipWin.addEventListener('pagehide', () => { pipWin = null; scheduleRender(); });
+  pipBuild();
+  scheduleRender();
+}
+function pipBuild() {
+  if (!pipWin) return;
+  const d = pipWin.document;
+  const c = { bg: cssVar('--bg'), track: cssVar('--surface-2'), accent: cssVar('--accent'), ink: cssVar('--accent-ink'), text: cssVar('--text'), muted: cssVar('--muted'), danger: cssVar('--danger') };
+  const rem = mtRemain(), ratio = mt.totalMs > 0 ? rem / mt.totalMs : 0, task = dayRec(todayStr()).task || '';
+  d.title = '타이머';
+  d.head.innerHTML = `<style>
+    *{box-sizing:border-box} html,body{margin:0;height:100%}
+    body{background:${c.bg};color:${c.text};font-family:-apple-system,"Apple SD Gothic Neo","Noto Sans KR",system-ui,sans-serif;display:flex;flex-direction:column;user-select:none;overflow:hidden}
+    .task{padding:12px 14px 0;font-size:13px;color:${c.muted};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
+    .task b{color:${c.text};font-weight:600}
+    .ring{flex:1;min-height:0;position:relative}
+    svg{position:absolute;inset:8px;width:calc(100% - 16px);height:calc(100% - 16px)}
+    .btns{display:flex;gap:14px;justify-content:center;align-items:center;padding:4px 8px 14px}
+    button{border-radius:50%;border:1px solid ${c.track};background:${c.track};color:${c.text};display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;font:700 12px system-ui,sans-serif}
+    button.sm{width:40px;height:40px} button.main{width:52px;height:52px;background:${c.accent};color:${c.ink};border-color:${c.accent}}
+  </style>`;
+  d.body.innerHTML = `<div class="task">${task ? `<b>${esc(task)}</b>` : '오늘 과제 없음'}</div>
+    <div class="ring"><svg viewBox="0 0 256 256" preserveAspectRatio="xMidYMid meet">
+      <g transform="rotate(-90 128 128)">
+        <circle cx="128" cy="128" r="${MT_R}" fill="none" stroke="${c.track}" stroke-width="10"/>
+        <circle id="pr" cx="128" cy="128" r="${MT_R}" fill="none" stroke="${mt.status === 'done' ? c.danger : c.accent}" stroke-width="10" stroke-linecap="round" stroke-dasharray="${MT_C}" style="stroke-dashoffset:${MT_C * (1 - ratio)};transition:stroke-dashoffset .3s linear"/>
+      </g>
+      <text id="pt" x="128" y="126" font-size="46" font-weight="600" fill="${c.text}" text-anchor="middle" dominant-baseline="middle" style="font-variant-numeric:tabular-nums">${fmtClock(rem)}</text>
+      <text id="ps" x="128" y="168" font-size="13" fill="${c.muted}" text-anchor="middle" dominant-baseline="middle" letter-spacing="2">${MT_LABEL[mt.status]}</text>
+    </svg></div>
+    <div class="btns">
+      <button class="sm" id="pReset" title="리셋">${ICON_RESET}</button>
+      <button class="main" id="pMain" title="시작/일시정지">${mtRunning() ? ICON_PAUSE : ICON_PLAY}</button>
+      <button class="sm" id="pAdd" title="1분 추가">+1m</button>
+    </div>`;
+  d.getElementById('pReset').onclick = () => mtReset();
+  d.getElementById('pMain').onclick = () => mtToggle();
+  d.getElementById('pAdd').onclick = () => mtAdd(60);
+}
+const pipRefresh = () => { if (pipWin) pipBuild(); };
+function pipUpdate(txt, ratio) {
+  if (!pipWin) return;
+  const d = pipWin.document;
+  const pt = d.getElementById('pt');
+  if (pt) pt.textContent = txt;
+  const pr = d.getElementById('pr');
+  if (pr) pr.style.strokeDashoffset = String(MT_C * (1 - ratio));
+  const ps = d.getElementById('ps');
+  if (ps) ps.textContent = MT_LABEL[mt.status];
+}
+
+/* ───────── 색상 ───────── */
+let appliedThemeKey = JSON.stringify(cachedTheme() || null);
+function syncTheme() {
+  if (ui.themeDraft) return; // 조정 중에는 덮어쓰지 않음
+  const th = settings().theme || null;
+  const key = JSON.stringify(th);
+  if (key === appliedThemeKey) return;
+  appliedThemeKey = key;
+  applyTheme(th); cacheTheme(th); pipRefresh();
+}
+function saveTheme(th) {
+  appliedThemeKey = JSON.stringify(th);
+  applyTheme(th); cacheTheme(th);
+  store.set('meta', 'settings', { theme: th });
+  pipRefresh();
+}
+function currentTheme() {
+  const th = ui.themeDraft || settings().theme;
+  if (th && th.mode === 'custom' && th.bg) return th;
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const p = PRESETS.find(x => x.id === (dark ? 'forest-dark' : 'forest'));
+  return { mode: 'auto', bg: { ...p.bg }, accent: { ...p.accent }, text: { ...p.text }, warm: { ...p.warm } };
+}
+function themeInput(el) {
+  const id = el.dataset.color, ch = el.dataset.ch;
+  const v = Math.max(0, Math.min(255, parseInt(el.value, 10) || 0));
+  if (!ui.themeDraft) ui.themeDraft = JSON.parse(JSON.stringify({ ...currentTheme(), mode: 'custom' }));
+  ui.themeDraft[id][ch] = v;
+  const pair = document.getElementById(`${el.type === 'range' ? 'cn' : 'cr'}-${id}-${ch}`);
+  if (pair) pair.value = v;
+  const sw = document.getElementById(`sw-${id}`);
+  if (sw) sw.style.background = rgb(ui.themeDraft[id]);
+  applyTheme(ui.themeDraft);
+}
+function commitThemeDraft() {
+  if (!ui.themeDraft) return;
+  const th = ui.themeDraft;
+  ui.themeDraft = null;
+  saveTheme(th);
 }
 
 /* ───────── 아이콘 ───────── */
@@ -171,25 +472,28 @@ const ICON = {
   week: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="15" rx="2.5"/><path d="M3 10h18M8 3v4M16 3v4M7 14.5h10"/></svg>',
   month: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="15" rx="2.5"/><path d="M3 10h18M8 3v4M16 3v4M7.5 13.5h.01M12 13.5h.01M16.5 13.5h.01M7.5 17h.01M12 17h.01"/></svg>',
   projects: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4M5 4h11.5l-2.2 3.8 2.2 3.8H5"/></svg>',
+  timer: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.8v3.9l2.4 1.8M9.5 2.8h5M12 2.8V6M18.3 6.8l1.4-1.4"/></svg>',
   settings: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
 };
 
 /* ───────── 공통 조각 ───────── */
 const center = html => `<div class="center-screen">${html}</div>`;
 
-function syncBadge(withId = true) {
+function syncBadge(id = 'sync-badge') {
   const s = store.status;
   let cls, text, title;
   if (s.mode === 'local') { cls = 'local'; text = '로컬 모드'; title = '이 기기에만 저장됩니다'; }
   else if (!s.online) { cls = 'off'; text = '오프라인'; title = '기기에 저장해 두었다가 연결되면 올립니다'; }
   else if (s.pending) { cls = 'pend'; text = '동기화 대기'; title = '서버에 올리는 중입니다'; }
   else { cls = 'ok'; text = '동기화됨'; title = '모든 기록이 서버와 맞춰져 있습니다'; }
-  return `<span ${withId ? 'id="sync-badge"' : ''} class="badge ${cls}" title="${title}"><i></i>${text}</span>`;
+  return `<span ${id ? `id="${id}"` : ''} class="badge ${cls}" title="${title}"><i></i>${text}</span>`;
 }
 
 function timerMini() {
-  if (!timer || (ui.view === 'day' && ui.day === todayStr())) return '';
-  return `<button class="timer-mini" data-action="goto-day" data-date="${todayStr()}" aria-label="타이머로 이동"><span id="timer-mini-text"></span></button>`;
+  let html = '';
+  if (timer && !(ui.view === 'day' && ui.day === todayStr())) html += `<button class="timer-mini" data-action="goto-day" data-date="${todayStr()}" aria-label="시작 타이머로 이동"><span id="timer-mini-text"></span></button>`;
+  if (mtRunning() && ui.view !== 'timer') html += `<button class="timer-mini alt" data-action="nav" data-view="timer" aria-label="타이머로 이동"><span id="mt-mini-text">${fmtClock(mtRemain())}</span></button>`;
+  return html;
 }
 
 function dateHeader(title, sub, kind, showReset, resetLabel) {
@@ -489,6 +793,116 @@ function viewProjects() {
   </section>`;
 }
 
+/* ───────── 타이머 화면 ───────── */
+function offerCard() {
+  const o = mt.offer;
+  return `<article class="card offer">
+    <p><b>${o.min}분</b> 집중했습니다. ${o.date === todayStr() ? '오늘' : fmtMD(o.date)} 집중 시간에 기록할까요?</p>
+    <div class="btn-row tight"><button class="btn primary" data-action="mt-record">기록</button><button class="btn" data-action="mt-norecord">기록 안 함</button></div>
+  </article>`;
+}
+
+function musicCard() {
+  const L = music.list, open = ui.musicOpen;
+  const tracks = L.map((t, i) => `<li class="track ${i === music.cur ? 'active' : ''}">
+      <span class="tn">${i + 1}</span><span class="tname" title="${esc(t.name)}">${esc(t.name)}</span>
+      <span class="tbtns">
+        <button class="icon-btn sm" data-action="music-move" data-i="${i}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="위로">↑</button>
+        <button class="icon-btn sm" data-action="music-move" data-i="${i}" data-dir="1" ${i === L.length - 1 ? 'disabled' : ''} aria-label="아래로">↓</button>
+        <button class="icon-btn sm" data-action="music-play" data-i="${i}" aria-label="재생">▶</button>
+        <button class="icon-btn sm" data-action="music-del" data-i="${i}" aria-label="삭제">×</button>
+      </span></li>`).join('');
+  return `<article class="card music">
+    <button class="music-head" data-action="music-open" aria-expanded="${open}"><span aria-hidden="true">🎵</span><b>알람 음악</b><span class="muted small">${L.length ? `${L.length}곡` : '기본 알림음'}</span><i class="chev">${open ? '−' : '+'}</i></button>
+    ${open ? `<div class="music-body">
+      <p class="muted small">타이머가 끝나면 첫 곡부터 재생됩니다. 비워 두면 기본 알림음이 울립니다. 올린 음악은 이 기기에 저장됩니다.</p>
+      <div class="btn-row tight wrap">
+        <label class="btn file-btn">+ 파일 추가<input type="file" id="music-file" accept="audio/*" multiple hidden></label>
+        <button class="btn" data-action="music-repeat">${music.repeat ? '반복 켜짐' : '반복 꺼짐'}</button>
+      </div>
+      ${L.length ? `<ul class="track-list">${tracks}</ul>
+      <div class="player">
+        <div class="player-btns">
+          <button class="round-btn sm" data-action="music-prev" aria-label="이전 곡">⏮</button>
+          <button class="round-btn main sm" data-action="music-toggle" aria-label="재생/일시정지">${music.playing ? ICON_PAUSE : ICON_PLAY}</button>
+          <button class="round-btn sm" data-action="music-next" aria-label="다음 곡">⏭</button>
+        </div>
+        <div class="now">${music.cur >= 0 && L[music.cur] ? esc(L[music.cur].name) : '트랙 없음'}</div>
+        <input type="range" id="music-seek" min="0" max="1000" value="0" aria-label="재생 위치">
+        <div class="time-row"><span id="music-cur">0:00</span><span id="music-dur">0:00</span></div>
+      </div>` : `<p class="muted small">파일을 추가하면 여기에 표시됩니다.</p>`}
+    </div>` : ''}
+  </article>`;
+}
+
+function viewTimer() {
+  const rem = mtRemain(), ratio = mt.totalMs > 0 ? rem / mt.totalMs : 0, run = mtRunning();
+  const set = Math.round(mt.setMs / 1000), h = Math.floor(set / 3600), m = Math.floor((set % 3600) / 60), s = set % 60;
+  const task = dayRec(todayStr()).task;
+  const pipOk = 'documentPictureInPicture' in window;
+  const fields = [['h', h, 23, '시간'], ['m', m, 59, '분'], ['s', s, 59, '초']]
+    .map(([k, v, max, lb], i) => `${i ? '<span class="mt-colon">:</span>' : ''}<label class="mt-in"><input id="mt-${k}" type="number" inputmode="numeric" min="0" max="${max}" value="${v}" ${run ? 'disabled' : ''} data-mt-input aria-label="${lb}"><span>${lb}</span></label>`).join('');
+  return `<section class="view">
+    <header class="vhead plain">
+      <div class="vtitle"><h1>타이머</h1><span class="sub">${task ? `오늘: ${esc(task)}` : '오늘 과제를 정하면 여기와 미니 창에 표시됩니다'}</span></div>
+      ${pipOk ? `<button class="btn ${pipWin ? 'primary' : ''}" data-action="mt-pip">${pipWin ? '미니 창 닫기' : '미니 창'}</button>` : ''}
+    </header>
+    ${mt.offer ? offerCard() : ''}
+    <article class="card mt-card">
+      <div class="mt-ring-wrap">
+        <svg class="mt-ring" viewBox="0 0 256 256" aria-hidden="true">
+          <circle class="mt-track" cx="128" cy="128" r="${MT_R}"/>
+          <circle id="mt-ring" class="mt-prog ${mt.status === 'done' ? 'done' : ''}" cx="128" cy="128" r="${MT_R}" stroke-dasharray="${MT_C.toFixed(2)}" style="stroke-dashoffset:${(MT_C * (1 - ratio)).toFixed(2)}"/>
+        </svg>
+        <div class="mt-center"><span id="mt-display" class="mt-num">${fmtClock(rem)}</span><span id="mt-label" class="mt-label">${MT_LABEL[mt.status]}</span></div>
+      </div>
+      <div class="mt-inputs ${run ? 'dim' : ''}">${fields}</div>
+      <div class="mt-presets">${[[1, '+1분'], [5, '+5분'], [10, '+10분'], [30, '+30분'], [60, '+1시간']].map(([n, l]) => `<button class="chip-btn" data-action="mt-preset" data-min="${n}">${l}</button>`).join('')}</div>
+      <div class="mt-controls">
+        <button class="round-btn" data-action="mt-reset" aria-label="리셋">${ICON_RESET}</button>
+        <button class="round-btn main" data-action="mt-toggle" aria-label="${run ? '일시정지' : '시작'}">${run ? ICON_PAUSE : ICON_PLAY}</button>
+        <button class="round-btn" data-action="mt-add" aria-label="1분 추가">+1m</button>
+      </div>
+    </article>
+    ${musicCard()}
+  </section>`;
+}
+
+function alarmOverlay() {
+  if (!mt.alarm) return '';
+  const min = Math.round(mtSession() / 60000);
+  return `<div class="alarm-ov" role="alertdialog" aria-label="타이머 종료"><div class="alarm-box">
+    <div class="alarm-icon" aria-hidden="true">⏰</div>
+    <b>타이머 종료</b>
+    ${min >= 1
+      ? `<p class="muted">이번에 ${min}분 집중했습니다. 집중 시간에 기록할까요?</p>
+         <div class="btn-col"><button class="btn primary" data-action="mt-dismiss" data-rec="1">기록하고 닫기</button><button class="btn" data-action="mt-dismiss" data-rec="0">기록 없이 닫기</button></div>`
+      : `<div class="btn-col"><button class="btn primary" data-action="mt-dismiss" data-rec="0">확인</button></div>`}
+  </div></div>`;
+}
+
+/* ───────── 색상 설정 카드 ───────── */
+function colorEditor(def, c) {
+  return `<div class="color-ed">
+    <div class="ce-head"><span>${def.label}${def.hint ? `<small class="muted"> · ${def.hint}</small>` : ''}</span><i class="swatch" id="sw-${def.id}" style="background:${rgb(c)}"></i></div>
+    ${['r', 'g', 'b'].map(ch => `<div class="rgb-row"><span>${ch.toUpperCase()}</span>
+      <input type="range" min="0" max="255" value="${c[ch]}" data-color="${def.id}" data-ch="${ch}" id="cr-${def.id}-${ch}" aria-label="${def.label} ${ch.toUpperCase()}">
+      <input type="number" min="0" max="255" inputmode="numeric" value="${c[ch]}" data-color="${def.id}" data-ch="${ch}" id="cn-${def.id}-${ch}" aria-label="${def.label} ${ch.toUpperCase()} 값"></div>`).join('')}
+  </div>`;
+}
+
+function colorCard() {
+  const th = currentTheme(), custom = th.mode === 'custom';
+  const same = p => custom && ['bg', 'accent', 'text', 'warm'].every(k => JSON.stringify(p[k]) === JSON.stringify({ r: th[k].r, g: th[k].g, b: th[k].b }));
+  return `<article class="card">
+    <div class="card-head"><h2>색상</h2><span class="muted small">${custom ? '직접 지정' : '기기 설정 따라감'}</span></div>
+    <div class="theme-row">${PRESETS.map(p => `<button class="theme-chip ${same(p) ? 'active' : ''}" data-action="theme-preset" data-id="${p.id}" style="--c-bg:${rgb(p.bg)};--c-ac:${rgb(p.accent)}"><i></i><span>${p.label}</span></button>`).join('')}</div>
+    <div class="color-editors">${COLOR_DEFS.map(d => colorEditor(d, th[d.id])).join('')}</div>
+    ${custom ? `<div class="btn-row"><button class="btn" data-action="theme-auto">기본값(라이트·다크 자동)으로 되돌리기</button></div>` : ''}
+    <p class="muted small">플래너·타이머·미니 창 전체에 적용되고, 같은 계정으로 로그인한 기기에도 동기화됩니다.</p>
+  </article>`;
+}
+
 /* ───────── 설정 화면 ───────── */
 function viewSettings() {
   const s = store.status;
@@ -497,7 +911,7 @@ function viewSettings() {
   return `<section class="view">
     <header class="vhead plain"><div class="vtitle"><h1>설정</h1></div></header>
     <article class="card">
-      <div class="card-head"><h2>계정과 동기화</h2>${syncBadge(false)}</div>
+      <div class="card-head"><h2>계정과 동기화</h2>${syncBadge('sync-badge-2')}</div>
       ${s.mode === 'cloud'
         ? `<p class="account">${esc(s.user?.email || '')}</p>
            <p class="muted small">같은 계정으로 로그인한 모든 기기에서 기록이 이어집니다. 오프라인에서 입력한 내용은 기기에 저장해 두었다가 연결되면 올립니다.</p>
@@ -505,9 +919,10 @@ function viewSettings() {
         : `<p class="muted small">Firebase 설정 전이라 이 기기에만 저장됩니다. 설정 안내(README)의 단계를 마치면 기기 간 연동이 켜지고, 그때 이 기기의 기록을 계정으로 옮길 수 있습니다.</p>`}
     </article>
     <article class="card">
-      <div class="card-head"><h2>타이머</h2></div>
+      <div class="card-head"><h2>오늘 화면의 시작 타이머</h2></div>
       <label class="field inline"><span>시작 타이머 길이(분)</span><input type="number" min="1" max="120" inputmode="numeric" data-bind="meta|settings|timerMin" data-key="meta|settings|timerMin" value="${timerMin()}"></label>
     </article>
+    ${colorCard()}
     <article class="card">
       <div class="card-head"><h2>데이터</h2></div>
       <div class="btn-row wrap tight">
@@ -579,18 +994,19 @@ function shell() {
   if (s.phase === 'error') return center(`<h1>열 수 없습니다</h1><p class="muted">${esc(s.error)}</p>`);
   if (s.phase === 'loading' || s.phase === 'syncing') return center(`<p class="muted">불러오는 중…</p>`);
   if (s.phase === 'login') return viewAuth();
-  const tabs = [['day', '오늘'], ['week', '주'], ['month', '달'], ['projects', '장기 과제'], ['settings', '설정']];
-  const views = { day: viewDay, week: viewWeek, month: viewMonth, projects: viewProjects, settings: viewSettings };
+  const tabs = [['day', '오늘'], ['week', '주'], ['month', '달'], ['projects', '장기 과제'], ['timer', '타이머']];
+  const views = { day: viewDay, week: viewWeek, month: viewMonth, projects: viewProjects, timer: viewTimer, settings: viewSettings };
   return `<div class="layout">
     <header class="topbar">
       <span class="brand">학업 플래너</span>
-      <span class="top-right">${timerMini()}${syncBadge()}</span>
+      <span class="top-right">${timerMini()}${syncBadge()}<button class="icon-btn gear ${ui.view === 'settings' ? 'active' : ''}" data-action="nav" data-view="settings" aria-label="설정">${ICON.settings}</button></span>
     </header>
     <nav class="tabs" aria-label="화면 전환">
       ${tabs.map(([v, label]) => `<button class="tab ${ui.view === v ? 'active' : ''}" data-action="nav" data-view="${v}" ${ui.view === v ? 'aria-current="page"' : ''}>${ICON[v]}<span>${label}</span></button>`).join('')}
     </nav>
     ${s.error ? `<div class="banner" role="alert"><span>${esc(s.error)}</span><button class="link-btn" data-action="dismiss-error">닫기</button></div>` : ''}
     <main class="main">${views[ui.view]()}</main>
+    ${alarmOverlay()}
   </div>`;
 }
 
@@ -623,8 +1039,10 @@ function render() {
 }
 
 function updateBadge() {
-  const el = document.getElementById('sync-badge');
-  if (el) el.outerHTML = syncBadge();
+  for (const id of ['sync-badge', 'sync-badge-2']) {
+    const el = document.getElementById(id);
+    if (el) el.outerHTML = syncBadge(id);
+  }
 }
 
 let toastTimer = 0;
@@ -769,6 +1187,33 @@ const actions = {
     toast(n ? `${n}개 항목을 가져왔습니다.` : '가져올 새 항목이 없습니다.');
   },
   'dismiss-error'() { store.clearError(); },
+
+  'mt-toggle'() { mtToggle(); },
+  'mt-reset'() { mtReset(); },
+  'mt-add'() { mtAdd(60); },
+  'mt-preset'(el) { mtPreset(Number(el.dataset.min)); },
+  'mt-dismiss'(el) { mtDismiss(el.dataset.rec === '1'); },
+  'mt-record'() { if (!mt.offer) return; recordFocus(mt.offer.min, mt.offer.date); mt.offer = null; mtSave(); scheduleRender(); },
+  'mt-norecord'() { mt.offer = null; mtSave(); scheduleRender(); },
+  'mt-pip'() { togglePip(); },
+  'music-open'() { ui.musicOpen = !ui.musicOpen; render(); },
+  'music-repeat'() { music.toggleRepeat(); },
+  'music-move'(el) { music.move(Number(el.dataset.i), Number(el.dataset.dir)); },
+  'music-play'(el) { music.play(Number(el.dataset.i)); },
+  'music-del'(el) {
+    const i = Number(el.dataset.i), t = music.list[i];
+    if (t && confirm(`'${t.name}'을(를) 목록에서 지울까요?`)) music.remove(i);
+  },
+  'music-toggle'() { music.toggle(); },
+  'music-prev'() { music.prev(); },
+  'music-next'() { music.next(); },
+  'theme-preset'(el) {
+    const p = PRESETS.find(x => x.id === el.dataset.id);
+    if (!p) return;
+    ui.themeDraft = null;
+    saveTheme({ mode: 'custom', bg: { ...p.bg }, accent: { ...p.accent }, text: { ...p.text }, warm: { ...p.warm } });
+  },
+  'theme-auto'() { ui.themeDraft = null; saveTheme({ mode: 'auto' }); },
 };
 
 const changeActions = {
@@ -795,6 +1240,9 @@ $app.addEventListener('click', e => {
 
 $app.addEventListener('change', e => {
   const el = e.target;
+  if (el.id === 'music-file') { if (el.files?.length) music.add([...el.files]); el.value = ''; return; }
+  if (el.dataset.color) { commitThemeDraft(); return; }
+  if ('mtInput' in el.dataset) return;
   if (el.dataset.bind) {
     const [col, id, field] = el.dataset.bind.split('|');
     const v = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) || 0 : el.value.trim();
@@ -805,6 +1253,13 @@ $app.addEventListener('change', e => {
   if (el.dataset.change) changeActions[el.dataset.change]?.(el);
 });
 const dayRecLike = (col, id) => store.data[col]?.[id] || {};
+
+$app.addEventListener('input', e => {
+  const el = e.target;
+  if ('mtInput' in el.dataset) { mtFromInputs(); return; }
+  if (el.dataset.color) { themeInput(el); return; }
+  if (el.id === 'music-seek') music.seek(Number(el.value) / 1000);
+});
 
 $app.addEventListener('keydown', e => {
   if (e.key !== 'Enter' || e.isComposing) return;
@@ -827,8 +1282,10 @@ document.addEventListener('visibilitychange', () => {
 });
 
 store.subscribe(reason => {
-  if (reason === 'status' && store.status.phase === 'ready' && ui.view !== 'settings') updateBadge();
-  else scheduleRender();
+  if (store.status.phase === 'ready') syncTheme();
+  if (reason === 'status' && store.status.phase === 'ready') { updateBadge(); return; }
+  scheduleRender();
+  pipRefresh();
 });
 
 // 자정이 지나면 '오늘'을 따라감
@@ -843,13 +1300,17 @@ setInterval(() => {
   scheduleRender();
 }, 30000);
 
-setInterval(tick, 500);
+setInterval(tick, 250);
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./sw.js').catch(err => console.warn('서비스 워커 등록 실패', err));
+    // 다른 앱 등이 오프라인용 파일을 지웠을 경우를 대비해, 온라인일 때마다 빠진 파일을 채워 넣음
+    navigator.serviceWorker.ready.then(reg => { if (navigator.onLine) reg.active?.postMessage('heal'); }).catch(() => {});
   });
 }
 
+if (mtRunning() && mt.endTime <= Date.now()) mtFinish(true); // 앱이 꺼진 사이 끝난 타이머
+music.load();
 render();
 store.init();

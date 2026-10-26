@@ -2,7 +2,7 @@
 // 온라인이면 항상 새 파일을 먼저 받아 오므로(네트워크 우선), GitHub에 올린 업데이트는
 // 다음에 온라인 상태로 앱을 열 때 반영됩니다. 파일을 추가하면 아래 SHELL 목록에도 넣어 주세요.
 
-const VERSION = 'v1.0.0';
+const VERSION = 'v1.1.0';
 const CACHE = `study-planner-${VERSION}`;
 const SHELL = [
   './',
@@ -10,6 +10,8 @@ const SHELL = [
   './styles.css',
   './app.js',
   './store.js',
+  './theme.js',
+  './music.js',
   './config.js',
   './vendor/firebase.js',
   './manifest.webmanifest',
@@ -43,6 +45,32 @@ self.addEventListener('fetch', event => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return; // Firebase 통신 등은 건드리지 않음
   event.respondWith(networkFirst(req));
+});
+
+// 앱이 온라인일 때 보내는 'heal' 요청: 캐시에서 빠진 파일을 다시 채움
+self.addEventListener('message', event => {
+  if (event.data === 'heal') event.waitUntil(heal());
+});
+
+async function heal() {
+  const cache = await caches.open(CACHE);
+  for (const url of SHELL) {
+    if (await cache.match(url)) continue;
+    try {
+      const res = await fetch(url, { cache: 'no-cache' });
+      if (res.ok) await cache.put(url, res);
+    } catch { /* 오프라인이면 다음 기회에 */ }
+  }
+}
+
+// 타이머 종료 알림을 누르면 앱 창으로 이동
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    if (wins.length) return wins[0].focus();
+    return self.clients.openWindow('./');
+  })());
 });
 
 async function networkFirst(req) {
