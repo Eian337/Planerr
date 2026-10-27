@@ -91,6 +91,18 @@ export class Music {
     }).catch(e => console.warn(e));
   }
 
+  // 끌어서 바꾼 순서(id 목록)를 그대로 적용
+  reorder(ids) {
+    const curId = this.list[this.cur]?.id;
+    const byId = new Map(this.list.map(t => [t.id, t]));
+    const next = ids.map(id => byId.get(id)).filter(Boolean);
+    if (next.length !== this.list.length) return;
+    this.list = next;
+    this.cur = curId ? next.findIndex(t => t.id === curId) : -1;
+    this._saveOrder();
+    this.onChange();
+  }
+
   move(i, dir) {
     const j = i + dir;
     if (j < 0 || j >= this.list.length) return;

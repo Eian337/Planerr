@@ -5,7 +5,7 @@ import { Music } from './music.js';
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -660,8 +660,9 @@ function taskBlock(date) {
     : tasks.length ? `<p class="all-done">✓ 모든 과제를 끝냈습니다</p>` : '';
   const rows = tasks.map((t, i) => {
     const editing = ui.editTask === `${date}|${t.id}`, isTop = t === top;
-    return `<li class="task-row ${t.done ? 'done' : ''} ${isTop ? 'is-top' : ''}">
+    return `<li class="task-row ${t.done ? 'done' : ''} ${isTop ? 'is-top' : ''}" data-sort-id="${t.id}">
       <div class="tr-main">
+        <button class="drag-handle" type="button" aria-label="끌어서 순서 바꾸기">${GRIP}</button>
         <span class="rank">${i + 1}</span>
         <input type="checkbox" data-change="tdone" data-date="${date}" data-id="${t.id}" ${t.done ? 'checked' : ''} aria-label="${esc(t.text)} 완료">
         <span class="tr-text">${esc(t.text)}${t.from ? `<small class="muted"> · ${fmtMD(t.from)}에서 넘어옴</small>` : ''}${t.memo && !isTop && !editing ? `<small class="tr-memo">${esc(t.memo)}</small>` : ''}</span>
@@ -683,7 +684,7 @@ function taskBlock(date) {
   }).join('');
   return `${focus}
     ${tasks.length ? `<div class="task-list-head"><span>우선순위</span>${undone ? `<button class="link-btn" data-action="t-carry-all" data-date="${date}">남은 ${undone}개 ${carryLabel(date)}</button>` : ''}</div>
-    <ol class="task-list">${rows}</ol>` : ''}
+    <ol class="task-list" data-sortable="tasks" data-date="${date}">${rows}</ol>` : ''}
     <div class="add-row">
       <input id="t-new-${date}" data-enter="t-add" data-date="${date}" placeholder="${tasks.length ? '과제 추가 (맨 아래 순위로)' : '예: 보고서 서론 쓰기'}" maxlength="120" autocomplete="off" aria-label="과제 추가">
       <button class="btn primary" data-action="t-add" data-date="${date}">추가</button>
@@ -941,8 +942,8 @@ function offerCard() {
 
 function musicCard() {
   const L = music.list, open = ui.musicOpen;
-  const tracks = L.map((t, i) => `<li class="track ${i === music.cur ? 'active' : ''}">
-      <span class="tn">${i + 1}</span><span class="tname" title="${esc(t.name)}">${esc(t.name)}</span>
+  const tracks = L.map((t, i) => `<li class="track ${i === music.cur ? 'active' : ''}" data-sort-id="${t.id}">
+      <button class="drag-handle" type="button" aria-label="끌어서 순서 바꾸기">${GRIP}</button><span class="tn">${i + 1}</span><span class="tname" title="${esc(t.name)}">${esc(t.name)}</span>
       <span class="tbtns">
         <button class="icon-btn sm" data-action="music-move" data-i="${i}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="위로">↑</button>
         <button class="icon-btn sm" data-action="music-move" data-i="${i}" data-dir="1" ${i === L.length - 1 ? 'disabled' : ''} aria-label="아래로">↓</button>
@@ -957,7 +958,7 @@ function musicCard() {
         <label class="btn file-btn">+ 파일 추가<input type="file" id="music-file" accept="audio/*" multiple hidden></label>
         <button class="btn" data-action="music-repeat">${music.repeat ? '반복 켜짐' : '반복 꺼짐'}</button>
       </div>
-      ${L.length ? `<ul class="track-list">${tracks}</ul>
+      ${L.length ? `<ul class="track-list" data-sortable="music">${tracks}</ul>
       <div class="player">
         <div class="player-btns">
           <button class="round-btn sm" data-action="music-prev" aria-label="이전 곡">⏮</button>
@@ -1149,7 +1150,7 @@ function shell() {
 
 let rafId = 0, composing = false, renderQueued = false;
 function scheduleRender() {
-  if (composing) { renderQueued = true; return; } // 한글 입력 조합 중에는 미룸
+  if (composing || drag) { renderQueued = true; return; } // 한글 입력 조합 중이거나 끌어서 옮기는 중에는 미룸
   if (rafId) return;
   rafId = requestAnimationFrame(() => { rafId = 0; render(); });
 }
@@ -1395,6 +1396,103 @@ const changeActions = {
   'ms-title'(el) { const v = el.value.trim(); if (v) updateMs(el.dataset.p, el.dataset.m, { title: v }); else render(); },
   'ms-due'(el) { if (el.value) updateMs(el.dataset.p, el.dataset.m, { due: el.value }); else render(); },
 };
+
+/* ───────── 끌어서 순서 바꾸기 (터치·마우스 공통) ───────── */
+// 목록: [data-sortable], 항목: [data-sort-id], 손잡이: .drag-handle
+// 끄는 동안에는 다른 항목을 transform으로만 밀어 두고, 놓을 때 한 번에 저장합니다.
+const GRIP = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>';
+let drag = null;
+
+function sortCommit(list, ids) {
+  if (list.dataset.sortable === 'tasks') {
+    const date = list.dataset.date, cur = getTasks(date);
+    setTasks(date, ids.map(id => cur.find(t => t.id === id)).filter(Boolean));
+  } else if (list.dataset.sortable === 'music') {
+    music.reorder(ids);
+  }
+}
+
+function dragStart(e, handle) {
+  if (drag || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  const el = handle.closest('[data-sort-id]'), list = el?.closest('[data-sortable]');
+  if (!el || !list) return;
+  e.preventDefault();
+  const items = [...list.querySelectorAll(':scope > [data-sort-id]')];
+  if (items.length < 2) return;
+  const sy = scrollY;
+  drag = {
+    el, list, handle, items, from: items.indexOf(el), to: items.indexOf(el), id: e.pointerId,
+    startY: e.clientY + sy, lastClientY: e.clientY,
+    mids: items.map(it => { const r = it.getBoundingClientRect(); return r.top + sy + r.height / 2; }),
+    shift: el.offsetHeight, raf: 0,
+  };
+  try { handle.setPointerCapture(e.pointerId); } catch { /* 무시 */ }
+  list.classList.add('sorting');
+  el.classList.add('dragging');
+  document.body.classList.add('is-dragging');
+  try { navigator.vibrate?.(8); } catch { /* 무시 */ }
+  handle.addEventListener('pointermove', dragMove);
+  handle.addEventListener('pointerup', dragEnd);
+  handle.addEventListener('pointercancel', dragEnd);
+  drag.raf = requestAnimationFrame(autoScroll);
+}
+
+function dragLayout() {
+  const d = drag, dy = d.lastClientY + scrollY - d.startY, center = d.mids[d.from] + dy;
+  d.el.style.transform = `translateY(${dy}px)`;
+  let to = 0;
+  d.mids.forEach((m, i) => { if (i !== d.from && m < center) to++; });
+  d.to = to;
+  d.items.forEach((it, i) => {
+    if (i === d.from) return;
+    let s = 0;
+    if (d.from < to && i > d.from && i <= to) s = -d.shift;
+    if (d.from > to && i >= to && i < d.from) s = d.shift;
+    it.style.transform = s ? `translateY(${s}px)` : '';
+  });
+}
+
+function dragMove(e) {
+  if (!drag || e.pointerId !== drag.id) return;
+  drag.lastClientY = e.clientY;
+  dragLayout();
+}
+
+// 화면 위·아래 가장자리로 끌면 저절로 스크롤
+function autoScroll() {
+  if (!drag) return;
+  const y = drag.lastClientY, top = 90, bottom = innerHeight - (innerWidth < 760 ? 110 : 50);
+  const v = y < top ? -Math.ceil((top - y) / 6) : y > bottom ? Math.ceil((y - bottom) / 6) : 0;
+  if (v) { scrollBy(0, v); dragLayout(); }
+  drag.raf = requestAnimationFrame(autoScroll);
+}
+
+function dragEnd(e) {
+  if (!drag || (e && e.pointerId !== drag.id)) return;
+  const d = drag;
+  drag = null;
+  cancelAnimationFrame(d.raf);
+  d.handle.removeEventListener('pointermove', dragMove);
+  d.handle.removeEventListener('pointerup', dragEnd);
+  d.handle.removeEventListener('pointercancel', dragEnd);
+  document.body.classList.remove('is-dragging');
+  d.list.classList.remove('sorting');
+  d.el.classList.remove('dragging');
+  d.items.forEach(it => { it.style.transform = ''; });
+  const ids = d.items.map(it => it.dataset.sortId);
+  const cancelled = e && e.type === 'pointercancel';
+  if (!cancelled && d.to !== d.from) {
+    const [moved] = ids.splice(d.from, 1);
+    ids.splice(d.to, 0, moved);
+    sortCommit(d.list, ids);
+  }
+  if (renderQueued) { renderQueued = false; scheduleRender(); }
+}
+
+$app.addEventListener('pointerdown', e => {
+  const h = e.target.closest('.drag-handle');
+  if (h && $app.contains(h)) dragStart(e, h);
+});
 
 $app.addEventListener('click', e => {
   const el = e.target.closest('[data-action]');

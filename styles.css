@@ -396,7 +396,7 @@ input[type=range]:focus { background: transparent; }
 .music-body p { margin: 0; }
 .file-btn { display: inline-flex; align-items: center; cursor: pointer; }
 .track-list { display: flex; flex-direction: column; }
-.track { display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--line); }
+.track { display: grid; grid-template-columns: 22px 18px 1fr auto; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--line); }
 .track:first-child { border-top: 0; }
 .track.active .tname { color: var(--accent); font-weight: 700; }
 .tn { font-size: 12px; color: var(--muted); text-align: center; font-variant-numeric: tabular-nums; }
@@ -442,7 +442,7 @@ input[type=range]:focus { background: transparent; }
 .task-list { list-style: none; margin: 0; padding: 0; }
 .task-row { border-top: 1px solid var(--line); }
 .task-row:first-child { border-top: 0; }
-.tr-main { display: grid; grid-template-columns: 18px 20px 1fr auto; align-items: center; gap: 8px; padding: 6px 0; }
+.tr-main { display: grid; grid-template-columns: 22px 16px 20px 1fr auto; align-items: center; gap: 6px; padding: 6px 0; }
 .rank { font-size: 12.5px; font-weight: 800; color: var(--muted); text-align: center; font-variant-numeric: tabular-nums; }
 .task-row.is-top .rank { color: var(--accent); }
 .tr-text { font-size: 14.5px; min-width: 0; }
@@ -453,7 +453,7 @@ input[type=range]:focus { background: transparent; }
 .task-row.done .tr-text { color: var(--muted); text-decoration: line-through; }
 .tr-btns { display: flex; }
 .icon-btn.sm.on { background: var(--surface-2); color: var(--text); }
-.tr-edit { padding: 4px 0 12px 26px; }
+.tr-edit { padding: 4px 0 12px 28px; }
 .tr-edit .fields { margin-bottom: 2px; }
 
 /* ── 주·달 화면: 과제 전체 표시 ── */
@@ -478,3 +478,18 @@ input[type=range]:focus { background: transparent; }
   .cal-marks { position: static; margin-top: auto; padding-top: 4px; }
 }
 .chip-btn.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+/* ── 끌어서 순서 바꾸기 ── */
+.drag-handle {
+  width: 22px; height: 32px; padding: 0; border: 0; background: none; color: var(--muted); opacity: .7;
+  display: grid; place-items: center; cursor: grab; touch-action: none; border-radius: 6px;
+}
+.drag-handle:hover { opacity: 1; background: var(--surface-2); }
+.sorting > [data-sort-id] { transition: transform .16s ease; }
+.sorting > [data-sort-id].dragging {
+  transition: none; position: relative; z-index: 5; background: var(--surface); border-radius: 10px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .18); border-top-color: transparent;
+}
+.sorting > .dragging + [data-sort-id] { border-top-color: transparent; }
+.dragging .drag-handle { cursor: grabbing; opacity: 1; color: var(--accent); }
+body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: none; cursor: grabbing; }
