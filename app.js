@@ -2,10 +2,12 @@
 import { Store } from './store.js';
 import { applyTheme, cachedTheme, cacheTheme, PRESETS, COLOR_DEFS, rgb } from './theme.js';
 import { Music } from './music.js';
+import * as CFG from './config.js';
+import { GCal, syncCalendar, eventSig, hexId, insertEvent, eventsPath } from './calendar.js';
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -45,6 +47,7 @@ const ui = {
   newProject: false,
   showArchived: false,
   editTask: null,
+  alarms: [],
   musicOpen: false,
   themeDraft: null,
 };
@@ -140,6 +143,7 @@ function chime() {
 }
 
 function tick() {
+  checkAlarms();
   if (mtRunning() && mtRemain() <= 0) mtFinish();
   else updateMainTimerDom();
   if (timer && timer.phase === 'warm' && elapsed() >= timer.warmMs) {
@@ -224,6 +228,7 @@ function mtToggle() {
   if (mtRunning()) {
     mt.remainMs = mtRemain(); mt.endTime = null; mt.status = 'paused';
     mtCloseSeg();
+    calTimerRemove();
   } else {
     if (mt.remainMs <= 0) {
       if (mt.setMs <= 0) { toast('시간을 먼저 정해 주세요.'); return; }
@@ -235,10 +240,12 @@ function mtToggle() {
     if (!mt.sessionDate) mt.sessionDate = todayStr();
   }
   mtSave(); scheduleRender(); pipRefresh();
+  if (mtRunning()) calTimerUpsert();
 }
 
 function mtReset() {
   mtStopAlarm();
+  calTimerRemove();
   mtOffer(mtSession(), mt.sessionDate);
   mtEndSession();
   const t = mt.setMs > 0 ? mt.setMs : MT_DEFAULT;
@@ -254,6 +261,7 @@ function mtAdd(sec) {
   } else if (mtRunning()) {
     const a = Math.min(add, Math.max(0, MT_CAP - mtRemain()));
     mt.endTime += a; mt.totalMs += a;
+    calTimerUpsert();
   } else {
     mt.remainMs = Math.min(MT_CAP, mt.remainMs + add);
     mt.totalMs = Math.min(MT_CAP, mt.totalMs + add);
@@ -305,11 +313,11 @@ function mtStopAlarm() {
 function askNotify() {
   try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch { /* 무시 */ }
 }
-async function notify(title, body) {
+async function notify(title, body, tag = 'planner-timer') {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   try {
     const reg = await navigator.serviceWorker?.getRegistration();
-    if (reg) { await reg.showNotification(title, { body, icon: './icons/icon-192.png', tag: 'planner-timer' }); return; }
+    if (reg) { await reg.showNotification(title, { body, icon: './icons/icon-192.png', tag }); return; }
   } catch { /* 아래 방식으로 */ }
   try { new Notification(title, { body }); } catch { /* 무시 */ }
 }
@@ -321,6 +329,7 @@ function mtFinish(silent = false) {
   if (silent) {
     mtOffer(mtSession(), mt.sessionDate);
     mtEndSession();
+    calTimerRemove();
   } else {
     music.playAlarm().then(ok => { if (!ok) playMelody(); });
     const task = topTask(todayStr())?.text;
@@ -332,6 +341,7 @@ function mtFinish(silent = false) {
 
 function mtDismiss(record) {
   mtStopAlarm();
+  calTimerRemove();
   const min = Math.round(mtSession() / 60000), date = mt.sessionDate || todayStr();
   if (record && min >= 1) recordFocus(min, date);
   mtEndSession();
@@ -361,6 +371,199 @@ function updateMainTimerDom() {
 function updateTitle(startText) {
   const t = startText ? `${startText} · ${BASE_TITLE}` : mtRunning() ? `${fmtClock(mtRemain())} · 타이머` : BASE_TITLE;
   if (document.title !== t) document.title = t;
+}
+
+/* ───────── 알림 (앱 안 알람 + 구글 캘린더) ───────── */
+const ALARM_DEFAULT = { dayBefore: { on: true, time: '20:00' }, sameDay: { on: false, time: '08:00' }, appSound: true, wakeLock: false };
+function alarmSet() {
+  const a = settings().alarms || {};
+  return { ...ALARM_DEFAULT, ...a, dayBefore: { ...ALARM_DEFAULT.dayBefore, ...(a.dayBefore || {}) }, sameDay: { ...ALARM_DEFAULT.sameDay, ...(a.sameDay || {}) } };
+}
+const atTime = (date, hm) => { const [h, m] = String(hm || '00:00').split(':').map(Number); const d = parse(date); d.setHours(h || 0, m || 0, 0, 0); return d.getTime(); };
+const hmOf = ms => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Seoul'; } catch { return 'Asia/Seoul'; } })();
+function isoLocal(ms) {
+  const d = new Date(ms), off = -d.getTimezoneOffset(), a = Math.abs(off);
+  return `${ymd(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}:00${off >= 0 ? '+' : '-'}${pad(Math.floor(a / 60))}:${pad(a % 60)}`;
+}
+const PLANNER_URL = location.origin + location.pathname;
+const deviceId = (() => {
+  try {
+    let v = localStorage.getItem('planner.device.v1');
+    if (!v) { v = Math.random().toString(36).slice(2, 10); localStorage.setItem('planner.device.v1', v); }
+    return v;
+  } catch { return 'dev'; }
+})();
+
+// 알림이 필요한 일정 전체: 과제 알림 시각, 장기 과제 중간 지점·공식 마감(어제부터)
+function alarmSchedule() {
+  const A = alarmSet(), from = addDays(todayStr(), -1), out = [];
+  for (const date of Object.keys(store.data.days)) {
+    if (date < from) continue;
+    for (const task of getTasks(date)) {
+      if (task.done || !task.alarm) continue;
+      out.push({ kind: 'task', key: `t|${date}|${task.id}`, at: atTime(date, task.alarm), title: task.text, body: task.memo || '' });
+    }
+  }
+  for (const p of activeProjects()) {
+    const marks = sortedMs(p).filter(m => !m.done && m.due).map(m => ({ key: `m|${p.id}|${m.id}`, due: m.due, title: `${p.name} · ${m.title}`, what: '중간 지점' }));
+    if (p.deadline) marks.push({ key: `d|${p.id}`, due: p.deadline, title: `${p.name}`, what: '공식 마감' });
+    for (const mk of marks) {
+      if (mk.due < from) continue;
+      const reminders = [A.dayBefore.on && atTime(addDays(mk.due, -1), A.dayBefore.time), A.sameDay.on && atTime(mk.due, A.sameDay.time)].filter(Boolean);
+      out.push({ kind: 'mark', key: mk.key, at: atTime(mk.due, A.sameDay.time), title: mk.title, what: mk.what, reminders });
+    }
+  }
+  return out;
+}
+
+// 앱 안 알람이 울릴 시각들
+function alarmTriggers() {
+  const out = [];
+  for (const it of alarmSchedule()) {
+    if (it.kind === 'task') out.push({ id: `${it.key}|${it.at}`, at: it.at, title: it.title, body: it.body || '과제 알림 시각입니다.' });
+    else for (const r of it.reminders) out.push({ id: `${it.key}|${r}`, at: r, title: `${r < it.at - 3600000 ? '내일' : '오늘'} ${it.what}`, body: it.title });
+  }
+  return out;
+}
+
+const FKEY = 'planner.fired.v1';
+let fired = (() => { try { return JSON.parse(localStorage.getItem(FKEY)) || {}; } catch { return {}; } })();
+let lastAlarmCheck = 0;
+function checkAlarms() {
+  const now = Date.now();
+  if (store.status.phase !== 'ready' || now - lastAlarmCheck < 2000) return;
+  lastAlarmCheck = now;
+  syncWakeLock();
+  const due = alarmTriggers().filter(a => a.at <= now && a.at > now - 10 * 60000 && !fired[a.id]);
+  if (!due.length) return;
+  for (const a of due) fired[a.id] = a.at;
+  for (const [k, v] of Object.entries(fired)) if (v < now - 3 * 86400000) delete fired[k];
+  try { localStorage.setItem(FKEY, JSON.stringify(fired)); } catch { /* 무시 */ }
+  ui.alarms = [...ui.alarms, ...due];
+  if (alarmSet().appSound) playMelody();
+  try { navigator.vibrate?.([250, 120, 250]); } catch { /* 무시 */ }
+  due.forEach((a, i) => notify(`⏰ ${a.title}`, a.body, `planner-alarm-${i}-${a.at}`));
+  scheduleRender();
+}
+function stopMelody() {
+  melody.forEach(o => { try { o.stop(); } catch { /* 이미 끝남 */ } });
+  melody = [];
+}
+
+let wakeLock = null, wakeBusy = false;
+async function syncWakeLock() {
+  const want = alarmSet().wakeLock && mtRunning() && !document.hidden && 'wakeLock' in navigator;
+  if (wakeBusy || want === !!wakeLock) return;
+  wakeBusy = true;
+  try {
+    if (want) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); }
+    else { await wakeLock.release(); wakeLock = null; }
+  } catch { wakeLock = null; } finally { wakeBusy = false; }
+}
+
+/* 구글 캘린더 */
+const gcal = new GCal({ clientId: CFG.googleClientId || '' });
+const calMeta = () => store.data.meta.calendar || {};
+const calConnected = () => gcal.available && !!calMeta().calendarId;
+let calBusy = false, calAutoTimer = 0;
+
+function calDesired() {
+  return alarmSchedule().map(it => {
+    const task = it.kind === 'task', start = it.at, end = start + (task ? 15 : 30) * 60000;
+    const minutes = task ? [0] : [...new Set(it.reminders.map(r => Math.max(0, Math.round((start - r) / 60000))))].slice(0, 5);
+    return {
+      id: hexId(`pl|${it.key}`),
+      summary: task ? `📚 ${it.title}` : it.what === '공식 마감' ? `⚑ ${it.title} 공식 마감` : `◆ ${it.title} (중간 지점)`,
+      description: [task ? it.body : '', `학업 플래너: ${PLANNER_URL}`].filter(Boolean).join('\n\n'),
+      start: { dateTime: isoLocal(start), timeZone: TZ },
+      end: { dateTime: isoLocal(end), timeZone: TZ },
+      reminders: { useDefault: false, overrides: minutes.map(m => ({ method: 'popup', minutes: m })) },
+      extendedProperties: { private: { planner: '1', kind: it.kind } },
+    };
+  });
+}
+
+// 캘린더에 아직 반영되지 않은 앞으로의 변경 개수
+function calPending() {
+  if (!calConnected()) return 0;
+  // synced: 'id|시작시각|서명' 문자열 목록(Firestore는 배열 안의 배열을 저장할 수 없음)
+  const now = Date.now(), synced = new Map((calMeta().synced || []).map(s => String(s).split('|')).map(([id, st, sig]) => [id, [Number(st), sig]]));
+  const want = calDesired();
+  const ids = new Set(want.map(e => e.id));
+  let n = 0;
+  for (const e of want) {
+    if (Date.parse(e.end.dateTime) < now) continue;
+    if (synced.get(e.id)?.[1] !== eventSig(e)) n++;
+  }
+  for (const [id, [st]] of synced) if (st >= now && !ids.has(id)) n++;
+  return n;
+}
+
+async function calSync({ interactive = false } = {}) {
+  if (calBusy || !gcal.available || (!interactive && !calConnected())) return;
+  if (!navigator.onLine) { if (interactive) toast('오프라인이라 캘린더에 보낼 수 없습니다. 연결되면 다시 눌러 주세요.'); return; }
+  if (!gcal.hasToken && !interactive) return;
+  calBusy = true;
+  scheduleRender();
+  try {
+    if (!gcal.hasToken) await gcal.authorize();
+    let calId = calMeta().calendarId;
+    const newCal = async () => { calId = await gcal.createCalendar(BASE_TITLE, TZ); store.set('meta', 'calendar', { calendarId: calId, synced: [] }); };
+    if (!calId) await newCal();
+    const desired = calDesired();
+    const opts = { from: new Date(atTime(addDays(todayStr(), -1), '00:00')), deviceId, activeTimerId: mt.calEventId || null };
+    let ops;
+    try { ops = await syncCalendar(gcal, calId, desired, opts); }
+    catch (e) {
+      if (e.status !== 404) throw e;
+      await newCal(); // 구글 캘린더에서 '학업 플래너' 캘린더를 지운 경우 새로 만듦
+      ops = await syncCalendar(gcal, calId, desired, opts);
+    }
+    store.set('meta', 'calendar', { calendarId: calId, synced: desired.map(e => `${e.id}|${Date.parse(e.start.dateTime)}|${eventSig(e)}`), syncedAt: Date.now() });
+    if (mtRunning()) calTimerUpsert();
+    if (interactive) toast(ops ? `캘린더에 ${ops}건 반영했습니다.` : '캘린더가 이미 최신 상태입니다.');
+  } catch (e) {
+    console.warn('캘린더 반영 실패', e);
+    if (e.status === 401) toast('캘린더 연결이 만료됐습니다. 📅 버튼을 다시 눌러 주세요.');
+    else if (e.code === 'popup' || e.code === 'gis') toast(`${e.message} 다시 눌러 주세요.`);
+    else if (e.code === 'access_denied' || e.code === 'scope') toast('캘린더 권한을 허용해야 연결됩니다.');
+    else if (interactive) toast(`캘린더 반영 실패: ${e.message}`);
+  } finally {
+    calBusy = false;
+    scheduleRender();
+  }
+}
+
+function scheduleCalAuto() {
+  clearTimeout(calAutoTimer);
+  calAutoTimer = setTimeout(() => { if (calConnected() && gcal.hasToken && navigator.onLine && calPending()) calSync(); }, 2500);
+}
+
+// 타이머 종료 시각도 캘린더에(권한이 살아 있고 온라인일 때만, 기기별)
+function calTimerUpsert() {
+  if (!calConnected() || !gcal.hasToken || !navigator.onLine || !mtRunning() || !mt.endTime) return;
+  const fresh = !mt.calEventId;
+  if (fresh) { mt.calEventId = hexId(`tm|${deviceId}|${Date.now()}`); mtSave(); }
+  const base = eventsPath(calMeta().calendarId), st = mt.endTime;
+  const ev = {
+    id: mt.calEventId, summary: '⏰ 타이머 종료', description: `학업 플래너: ${PLANNER_URL}`,
+    start: { dateTime: isoLocal(st), timeZone: TZ }, end: { dateTime: isoLocal(st + 5 * 60000), timeZone: TZ },
+    reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 0 }] },
+    extendedProperties: { private: { planner: '1', kind: 'timer', device: deviceId } },
+  };
+  (fresh ? insertEvent(gcal, base, ev) : gcal.api('PUT', `${base}/${ev.id}`, ev)
+    .catch(e => (e.status === 404 ? insertEvent(gcal, base, ev) : Promise.reject(e))))
+    .catch(e => console.warn('타이머 캘린더 알림 실패', e))
+    .finally(() => scheduleRender());
+}
+function calTimerRemove() {
+  const id = mt.calEventId;
+  if (!id) return;
+  mt.calEventId = null;
+  mtSave();
+  if (!calConnected() || !gcal.hasToken || !navigator.onLine) return; // 못 지우면 다음 반영 때 정리됨
+  gcal.api('DELETE', `${eventsPath(calMeta().calendarId)}/${id}`).catch(() => {});
 }
 
 /* 미션 창(Document Picture-in-Picture, 크롬 계열 전용) — 오늘 과제 목록 + 작은 타이머 */
@@ -407,6 +610,7 @@ function pipBuild() {
     .q.done .box{background:${c.accent};border-color:${c.accent}}
     .q.done .qt{color:${c.muted};text-decoration:line-through}
     .qt{word-break:keep-all;overflow-wrap:anywhere}
+    .al{font-size:11px;color:${c.warm};font-weight:700;white-space:nowrap}
     .empty{color:${c.muted};margin:0;padding:8px 6px}
     .proj{margin-top:6px;padding:6px 0 0;border-top:1px dashed ${c.line}}
     .pj{display:flex;gap:6px;align-items:flex-start;padding:3px 6px;font-size:12px;color:${c.muted}}
@@ -432,7 +636,7 @@ function pipBuild() {
     .pill.main{background:${c.accent};border-color:${c.accent};color:${c.ink}}
   </style>`;
 
-  const rows = tasks.map(t => `<li><button class="q ${t.done ? 'done' : ''} ${t === top ? 'top' : ''}" data-id="${t.id}" title="${t.done ? '완료 취소' : '완료로 표시'}"><span class="box">${t.done ? '✓' : ''}</span><span class="qt">${esc(t.text)}</span></button></li>`).join('');
+  const rows = tasks.map(t => `<li><button class="q ${t.done ? 'done' : ''} ${t === top ? 'top' : ''}" data-id="${t.id}" title="${t.done ? '완료 취소' : '완료로 표시'}"><span class="box">${t.done ? '✓' : ''}</span><span class="qt">${esc(t.text)}${t.alarm && !t.done ? ` <span class="al">⏰${esc(t.alarm)}</span>` : ''}</span></button></li>`).join('');
   const proj = activeProjects()
     .map(p => ({ p, next: sortedMs(p).find(m => !m.done) }))
     .filter(x => x.next || x.p.deadline)
@@ -649,6 +853,7 @@ function taskBlock(date) {
       ${field(t, 'text', '과제', '과제 이름')}
       <label class="field"><span>뭘 할지</span><textarea rows="2" data-tfield="memo" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|memo" maxlength="500" placeholder="예: 문제집 42쪽부터 3문제 풀기">${esc(t.memo || '')}</textarea></label>
       ${isTop ? field(t, 'cue', '시작 시점 (선택)', '예: 점심 먹고 책상에 앉으면') : ''}
+      <label class="field"><span>알림 시각 (선택)</span><span class="time-row"><input type="time" data-tfield="alarm" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|alarm" value="${esc(t.alarm || '')}">${t.alarm ? `<button type="button" class="link-btn" data-action="t-alarm-clear" data-date="${date}" data-id="${t.id}">지우기</button>` : ''}</span></label>
       ${projects.length ? `<label class="field"><span>장기 과제</span><select data-change="tlink" data-date="${date}" data-id="${t.id}" data-key="tl|${date}|${t.id}">${linkOptions(t, projects)}</select></label>` : ''}
     </div>
     ${isTop && t.cue ? `<p class="plan-line"><span>${esc(t.cue)}</span><i>→</i><span>${esc(t.text)}</span></p>` : ''}`;
@@ -665,7 +870,7 @@ function taskBlock(date) {
         <button class="drag-handle" type="button" aria-label="끌어서 순서 바꾸기">${GRIP}</button>
         <span class="rank">${i + 1}</span>
         <input type="checkbox" data-change="tdone" data-date="${date}" data-id="${t.id}" ${t.done ? 'checked' : ''} aria-label="${esc(t.text)} 완료">
-        <span class="tr-text">${esc(t.text)}${t.from ? `<small class="muted"> · ${fmtMD(t.from)}에서 넘어옴</small>` : ''}${t.memo && !isTop && !editing ? `<small class="tr-memo">${esc(t.memo)}</small>` : ''}</span>
+        <span class="tr-text">${esc(t.text)}${t.alarm && !t.done ? `<small class="tr-alarm"> ⏰ ${esc(t.alarm)}</small>` : ''}${t.from ? `<small class="muted"> · ${fmtMD(t.from)}에서 넘어옴</small>` : ''}${t.memo && !isTop && !editing ? `<small class="tr-memo">${esc(t.memo)}</small>` : ''}</span>
         <span class="tr-btns">
           <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="우선순위 올리기">↑</button>
           <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="1" ${i === tasks.length - 1 ? 'disabled' : ''} aria-label="우선순위 내리기">↓</button>
@@ -1001,6 +1206,7 @@ function viewTimer() {
         <button class="round-btn main" data-action="mt-toggle" aria-label="${run ? '일시정지' : '시작'}">${run ? ICON_PAUSE : ICON_PLAY}</button>
         <button class="round-btn" data-action="mt-add" aria-label="1분 추가">+1m</button>
       </div>
+      ${run && calConnected() ? `<p class="muted small center">${mt.calEventId ? '📅 끝나는 시각을 캘린더에도 넣었습니다.' : '📅 캘린더 연결이 만료돼 앱 알람만 울립니다.'}</p>` : ''}
     </article>
     ${musicCard()}
   </section>`;
@@ -1017,6 +1223,60 @@ function alarmOverlay() {
          <div class="btn-col"><button class="btn primary" data-action="mt-dismiss" data-rec="1">기록하고 닫기</button><button class="btn" data-action="mt-dismiss" data-rec="0">기록 없이 닫기</button></div>`
       : `<div class="btn-col"><button class="btn primary" data-action="mt-dismiss" data-rec="0">확인</button></div>`}
   </div></div>`;
+}
+
+function appAlarmOverlay() {
+  if (mt.alarm || !ui.alarms.length) return '';
+  return `<div class="alarm-ov" role="alertdialog" aria-label="알림"><div class="alarm-box">
+    <div class="alarm-icon" aria-hidden="true">⏰</div>
+    <ul class="alarm-list">${ui.alarms.map(a => `<li><b>${esc(a.title)}</b>${a.body ? `<span>${esc(a.body)}</span>` : ''}<small class="muted">${hmOf(a.at)}</small></li>`).join('')}</ul>
+    <div class="btn-col"><button class="btn primary" data-action="alarm-ok">확인</button></div>
+  </div></div>`;
+}
+
+function calChip() {
+  if (!calConnected()) return '';
+  if (calBusy) return `<span class="badge cal pend" title="캘린더에 반영하는 중">📅 …</span>`;
+  const n = calPending();
+  return n ? `<button class="badge cal" data-action="cal-sync" title="캘린더에 반영할 변경 ${n}건 · 눌러서 보내기" aria-label="캘린더에 반영할 변경 ${n}건, 눌러서 보내기">📅 ${n}</button>` : '';
+}
+
+function alarmCard() {
+  const A = alarmSet();
+  const perm = 'Notification' in window ? Notification.permission : 'unsupported';
+  const permText = { granted: '허용됨', denied: '차단됨(브라우저 설정에서 허용해 주세요)', default: '아직 묻지 않음', unsupported: '이 브라우저는 알림을 지원하지 않습니다(아이패드·아이폰은 홈 화면에 설치한 앱에서 지원)' }[perm];
+  const row = (k, label) => `<div class="alarm-row">
+      <label class="check"><input type="checkbox" data-alarm="${k}.on" ${A[k].on ? 'checked' : ''}><span>${label}</span></label>
+      <input type="time" data-alarm="${k}.time" data-key="alarm|${k}" value="${esc(A[k].time)}" aria-label="${label} 시각">
+    </div>`;
+  return `<article class="card">
+    <div class="card-head"><h2>알림</h2></div>
+    <p class="muted small">과제마다 '알림 시각'을 정할 수 있고, 장기 과제의 중간 지점·공식 마감은 아래 시각에 알려 줍니다. 앱 안 알람은 앱이 열려 있을 때 울리고, 구글 캘린더를 연결하면 앱이 꺼져 있거나 오프라인이어도 캘린더 앱이 알려 줍니다.</p>
+    <div class="alarm-rows">${row('dayBefore', '중간 지점·마감 전날')}${row('sameDay', '중간 지점·마감 당일')}</div>
+    <div class="fields">
+      <label class="check"><input type="checkbox" data-alarm="appSound" ${A.appSound ? 'checked' : ''}><span>앱 안 알람 소리</span></label>
+      <label class="check"><input type="checkbox" data-alarm="wakeLock" ${A.wakeLock ? 'checked' : ''}><span>타이머 실행 중 화면 켜 두기 <small class="muted">(화면이 꺼지면 앱 알람이 멈출 수 있어서)</small></span></label>
+    </div>
+    <div class="perm-row"><span class="muted small">이 기기의 알림 권한: ${permText}</span>${perm === 'default' ? `<button class="btn sm" data-action="ask-notify">알림 허용</button>` : ''}</div>
+  </article>`;
+}
+
+function calendarCard() {
+  const head = s => `<div class="card-head"><h2>구글 캘린더</h2><span class="muted small">${s}</span></div>`;
+  if (!gcal.available) return `<article class="card">${head('설정 전')}<p class="muted small">Google Cloud에서 OAuth 클라이언트를 만들어 config.js에 넣으면 켤 수 있습니다(README의 '구글 캘린더 연결' 참고).</p></article>`;
+  const m = calMeta();
+  if (!m.calendarId) {
+    return `<article class="card">${head('연결 안 됨')}
+      <p class="muted small">연결하면 구글 캘린더에 '학업 플래너' 캘린더를 만들고, 알림이 필요한 일정을 자동으로 넣습니다. 플래너가 만든 캘린더만 다루고, 원래 쓰던 일정에는 손대지 않습니다. 연결은 크롬북에서 하는 것을 권합니다.</p>
+      <div class="btn-row"><button class="btn primary" data-action="cal-sync">구글 캘린더 연결</button></div></article>`;
+  }
+  const n = calPending();
+  const status = calBusy ? '반영 중…' : n ? `반영 대기 ${n}건` : '최신 상태';
+  return `<article class="card">${head(status)}
+    <p class="muted small">'학업 플래너' 캘린더에 알림 일정을 넣고 있습니다.${m.syncedAt ? ` 마지막 반영: ${fmtMD(ymd(new Date(m.syncedAt)))} ${hmOf(m.syncedAt)}` : ''}</p>
+    <p class="muted small">구글 연결 권한은 1시간 정도면 만료됩니다. 만료된 뒤 바뀐 내용이 있으면 상단에 📅 표시가 뜨고, 누르면 반영됩니다.${gcal.hasToken ? ' 지금은 연결이 살아 있어 바뀐 내용이 자동으로 반영됩니다.' : ''}</p>
+    <div class="btn-row wrap"><button class="btn" data-action="cal-sync" ${calBusy ? 'disabled' : ''}>지금 반영</button><button class="btn danger" data-action="cal-disconnect">연결 해제</button></div>
+  </article>`;
 }
 
 /* ───────── 색상 설정 카드 ───────── */
@@ -1060,6 +1320,8 @@ function viewSettings() {
       <div class="card-head"><h2>오늘 화면의 시작 타이머</h2></div>
       <label class="field inline"><span>시작 타이머 길이(분)</span><input type="number" min="1" max="120" inputmode="numeric" data-bind="meta|settings|timerMin" data-key="meta|settings|timerMin" value="${timerMin()}"></label>
     </article>
+    ${alarmCard()}
+    ${calendarCard()}
     ${colorCard()}
     <article class="card">
       <div class="card-head"><h2>데이터</h2></div>
@@ -1137,7 +1399,7 @@ function shell() {
   return `<div class="layout">
     <header class="topbar">
       <span class="brand">학업 플래너</span>
-      <span class="top-right">${timerMini()}${syncBadge()}<button class="icon-btn gear ${ui.view === 'settings' ? 'active' : ''}" data-action="nav" data-view="settings" aria-label="설정">${ICON.settings}</button></span>
+      <span class="top-right">${timerMini()}${calChip()}${syncBadge()}<button class="icon-btn gear ${ui.view === 'settings' ? 'active' : ''}" data-action="nav" data-view="settings" aria-label="설정">${ICON.settings}</button></span>
     </header>
     <nav class="tabs" aria-label="화면 전환">
       ${tabs.map(([v, label]) => `<button class="tab ${ui.view === v ? 'active' : ''}" data-action="nav" data-view="${v}" ${ui.view === v ? 'aria-current="page"' : ''}>${ICON[v]}<span>${label}</span></button>`).join('')}
@@ -1145,6 +1407,7 @@ function shell() {
     ${s.error ? `<div class="banner" role="alert"><span>${esc(s.error)}</span><button class="link-btn" data-action="dismiss-error">닫기</button></div>` : ''}
     <main class="main ${ui.view === 'month' ? 'wide' : ''}">${views[ui.view]()}</main>
     ${alarmOverlay()}
+    ${appAlarmOverlay()}
   </div>`;
 }
 
@@ -1326,6 +1589,19 @@ const actions = {
   },
   'dismiss-error'() { store.clearError(); },
 
+  'alarm-ok'() { ui.alarms = []; stopMelody(); render(); },
+  'ask-notify'() {
+    try { Notification.requestPermission().then(() => render()); } catch { /* 무시 */ }
+  },
+  't-alarm-clear'(el) { updateTask(el.dataset.date, el.dataset.id, { alarm: '' }); },
+  'cal-sync'() { calSync({ interactive: true }); },
+  'cal-disconnect'() {
+    if (!confirm("캘린더 연결을 해제할까요? 구글 캘린더의 '학업 플래너' 캘린더는 그대로 남으니, 필요 없으면 구글 캘린더에서 직접 지워 주세요.")) return;
+    gcal.revoke();
+    store.set('meta', 'calendar', { calendarId: null, synced: [], syncedAt: null });
+    toast('캘린더 연결을 해제했습니다.');
+  },
+
   't-add'(el) {
     const date = el.dataset.date, inp = document.getElementById(`t-new-${date}`), text = inp?.value.trim();
     if (!text) { inp?.focus(); return; }
@@ -1505,7 +1781,15 @@ $app.addEventListener('change', e => {
   if (el.id === 'music-file') { if (el.files?.length) music.add([...el.files]); el.value = ''; return; }
   if (el.dataset.color) { commitThemeDraft(); return; }
   if ('mtInput' in el.dataset) return;
-  if (el.dataset.tfield) { changeActions.tfield(el); return; }
+  if (el.dataset.tfield) { changeActions.tfield(el); if (el.dataset.tfield === 'alarm' && el.value) askNotify(); return; }
+  if (el.dataset.alarm) {
+    const A = alarmSet(), [k, sub] = el.dataset.alarm.split('.');
+    const v = el.type === 'checkbox' ? el.checked : el.value;
+    if (sub) { if (sub === 'time' && !v) { render(); return; } A[k] = { ...A[k], [sub]: v }; } else A[k] = v;
+    store.set('meta', 'settings', { alarms: A });
+    if (v === true) askNotify();
+    return;
+  }
   if (el.dataset.bind) {
     const [col, id, field] = el.dataset.bind.split('|');
     const v = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) || 0 : el.value.trim();
@@ -1549,6 +1833,11 @@ store.subscribe(reason => {
   if (reason === 'status' && store.status.phase === 'ready') { updateBadge(); return; }
   scheduleRender();
   pipRefresh();
+  if (store.status.phase === 'ready') scheduleCalAuto();
+});
+addEventListener('online', () => {
+  if (gcal.available) gcal.loadGis().catch(() => {});
+  scheduleCalAuto();
 });
 
 // 자정이 지나면 '오늘'을 따라감
@@ -1576,5 +1865,6 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
 
 if (mtRunning() && mt.endTime <= Date.now()) mtFinish(true); // 앱이 꺼진 사이 끝난 타이머
 music.load();
+if (gcal.available && navigator.onLine) gcal.loadGis().catch(() => {}); // 버튼을 누르는 순간 바로 연결 창을 열 수 있게 미리 불러 둠
 render();
 store.init();

@@ -9,3 +9,7 @@ export const firebaseConfig = {
   messagingSenderId: "301322035684",
   appId: "1:301322035684:web:142099462485939ca467f1"
 };
+
+// 구글 캘린더 연동용 OAuth 클라이언트 ID(Google Cloud 콘솔에서 만든 '웹 애플리케이션' 클라이언트).
+// 비워 두면 캘린더 연동 없이 앱 안 알람만 동작합니다. 이 값도 공개되어도 괜찮은 식별자입니다.
+export const googleClientId = '';

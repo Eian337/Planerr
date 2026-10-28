@@ -493,3 +493,18 @@ input[type=range]:focus { background: transparent; }
 .sorting > .dragging + [data-sort-id] { border-top-color: transparent; }
 .dragging .drag-handle { cursor: grabbing; opacity: 1; color: var(--accent); }
 body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: none; cursor: grabbing; }
+
+/* ── 알림 ── */
+.time-row { display: flex; align-items: center; gap: 10px; }
+.time-row input[type=time] { width: auto; min-width: 130px; }
+.tr-alarm { color: var(--warm); font-weight: 700; }
+.alarm-list { list-style: none; margin: 4px 0 0; padding: 0; width: 100%; display: flex; flex-direction: column; gap: 8px; text-align: left; }
+.alarm-list li { background: var(--surface-2); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+.alarm-list li b { font-size: 16px; }
+.alarm-list li span { font-size: 14px; }
+.alarm-rows { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.alarm-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.alarm-row input[type=time] { width: auto; min-width: 120px; }
+.perm-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.badge.cal { border: 0; cursor: pointer; background: var(--warm-soft); color: var(--text); font-weight: 700; }
+.badge.cal.pend { cursor: default; }
