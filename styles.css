@@ -508,3 +508,11 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 .perm-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
 .badge.cal { border: 0; cursor: pointer; background: var(--warm-soft); color: var(--text); font-weight: 700; }
 .badge.cal.pend { cursor: default; }
+
+/* ── 과제 마감일 ── */
+.due-tag { font-size: 12px; color: var(--muted); font-weight: 600; margin-left: 4px; white-space: nowrap; }
+.due-tag.soon { color: var(--warm); font-weight: 700; }
+.due-tag.late { color: var(--danger); font-weight: 700; }
+.add-row .due-in { flex: 0 1 150px; width: auto; }
+.cal-marks i.mk-tdue, .cal-cell.started .cal-marks i.mk-tdue { background: var(--warm); }
+.ev.tdue.late .ev-date { color: var(--danger); font-weight: 700; }

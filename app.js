@@ -7,7 +7,7 @@ import { GCal, syncCalendar, eventSig, hexId, insertEvent, eventsPath } from './
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.6.0';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -72,6 +72,11 @@ function eventsBetween(a, b) {
       if (m.due && m.due >= a && m.due <= b) out.push({ kind: 'ms', date: m.due, title: m.title, project: p.name, pid: p.id, mid: m.id, done: !!m.done });
     }
     if (p.deadline && p.deadline >= a && p.deadline <= b) out.push({ kind: 'deadline', date: p.deadline, project: p.name, pid: p.id });
+  }
+  for (const d of Object.keys(store.data.days)) {
+    for (const t of getTasks(d)) {
+      if (t.due && t.due >= a && t.due <= b) out.push({ kind: 'tdue', date: t.due, title: t.text, tdate: d, tid: t.id, done: !!t.done });
+    }
   }
   return out.sort((x, y) => x.date.localeCompare(y.date) || (x.kind === 'deadline') - (y.kind === 'deadline'));
 }
@@ -395,7 +400,7 @@ const deviceId = (() => {
   } catch { return 'dev'; }
 })();
 
-// 알림이 필요한 일정 전체: 과제 알림 시각, 장기 과제 중간 지점·공식 마감(어제부터)
+// 알림이 필요한 일정 전체: 과제 알림 시각, 과제 마감일, 장기 과제 중간 지점·공식 마감(어제부터)
 function alarmSchedule() {
   const A = alarmSet(), from = addDays(todayStr(), -1), out = [];
   for (const date of Object.keys(store.data.days)) {
@@ -405,9 +410,15 @@ function alarmSchedule() {
       out.push({ kind: 'task', key: `t|${date}|${task.id}`, at: atTime(date, task.alarm), title: task.text, body: task.memo || '' });
     }
   }
+  const marks = [];
+  for (const d of Object.keys(store.data.days)) {
+    for (const task of getTasks(d)) if (!task.done && task.due) marks.push({ key: `td|${task.id}`, due: task.due, title: task.text, what: '과제 마감' });
+  }
   for (const p of activeProjects()) {
-    const marks = sortedMs(p).filter(m => !m.done && m.due).map(m => ({ key: `m|${p.id}|${m.id}`, due: m.due, title: `${p.name} · ${m.title}`, what: '중간 지점' }));
+    marks.push(...sortedMs(p).filter(m => !m.done && m.due).map(m => ({ key: `m|${p.id}|${m.id}`, due: m.due, title: `${p.name} · ${m.title}`, what: '중간 지점' })));
     if (p.deadline) marks.push({ key: `d|${p.id}`, due: p.deadline, title: `${p.name}`, what: '공식 마감' });
+  }
+  {
     for (const mk of marks) {
       if (mk.due < from) continue;
       const reminders = [A.dayBefore.on && atTime(addDays(mk.due, -1), A.dayBefore.time), A.sameDay.on && atTime(mk.due, A.sameDay.time)].filter(Boolean);
@@ -474,7 +485,7 @@ function calDesired() {
     const minutes = task ? [0] : [...new Set(it.reminders.map(r => Math.max(0, Math.round((start - r) / 60000))))].slice(0, 5);
     return {
       id: hexId(`pl|${it.key}`),
-      summary: task ? `📚 ${it.title}` : it.what === '공식 마감' ? `⚑ ${it.title} 공식 마감` : `◆ ${it.title} (중간 지점)`,
+      summary: task ? `📚 ${it.title}` : it.what === '공식 마감' ? `⚑ ${it.title} 공식 마감` : it.what === '과제 마감' ? `⚑ ${it.title} 마감` : `◆ ${it.title} (중간 지점)`,
       description: [task ? it.body : '', `학업 플래너: ${PLANNER_URL}`].filter(Boolean).join('\n\n'),
       start: { dateTime: isoLocal(start), timeZone: TZ },
       end: { dateTime: isoLocal(end), timeZone: TZ },
@@ -611,6 +622,7 @@ function pipBuild() {
     .q.done .qt{color:${c.muted};text-decoration:line-through}
     .qt{word-break:keep-all;overflow-wrap:anywhere}
     .al{font-size:11px;color:${c.warm};font-weight:700;white-space:nowrap}
+    .du{font-size:11px;color:${c.muted};white-space:nowrap} .du.soon{color:${c.warm};font-weight:700} .du.late{color:${c.danger};font-weight:700}
     .empty{color:${c.muted};margin:0;padding:8px 6px}
     .proj{margin-top:6px;padding:6px 0 0;border-top:1px dashed ${c.line}}
     .pj{display:flex;gap:6px;align-items:flex-start;padding:3px 6px;font-size:12px;color:${c.muted}}
@@ -636,7 +648,7 @@ function pipBuild() {
     .pill.main{background:${c.accent};border-color:${c.accent};color:${c.ink}}
   </style>`;
 
-  const rows = tasks.map(t => `<li><button class="q ${t.done ? 'done' : ''} ${t === top ? 'top' : ''}" data-id="${t.id}" title="${t.done ? '완료 취소' : '완료로 표시'}"><span class="box">${t.done ? '✓' : ''}</span><span class="qt">${esc(t.text)}${t.alarm && !t.done ? ` <span class="al">⏰${esc(t.alarm)}</span>` : ''}</span></button></li>`).join('');
+  const rows = tasks.map(t => `<li><button class="q ${t.done ? 'done' : ''} ${t === top ? 'top' : ''}" data-id="${t.id}" title="${t.done ? '완료 취소' : '완료로 표시'}"><span class="box">${t.done ? '✓' : ''}</span><span class="qt">${esc(t.text)}${t.due && !t.done ? ` <span class="du ${dueCls(t)}">${dueText(t)}</span>` : ''}${t.alarm && !t.done ? ` <span class="al">⏰${esc(t.alarm)}</span>` : ''}</span></button></li>`).join('');
   const proj = activeProjects()
     .map(p => ({ p, next: sortedMs(p).find(m => !m.done) }))
     .filter(x => x.next || x.p.deadline)
@@ -770,6 +782,14 @@ function dateHeader(title, sub, kind, showReset, resetLabel) {
 
 function evItem(e) {
   const t = todayStr();
+  if (e.kind === 'tdue') {
+    const late = !e.done && e.date < t;
+    return `<li class="ev tdue ${e.done ? 'done' : ''} ${late ? 'late' : ''}">
+    <span class="ev-check"><input type="checkbox" data-change="tdone" data-date="${e.tdate}" data-id="${e.tid}" ${e.done ? 'checked' : ''} aria-label="${esc(e.title)} 완료"></span>
+    <span class="ev-main">${esc(e.title)}<small>과제 마감${e.tdate !== t ? ` · ${fmtMD(e.tdate)} 목록에 있음` : ''}</small></span>
+    <span class="ev-date">${fmtMD(e.date)} · ${late ? '지남' : dday(e.date)}</span>
+  </li>`;
+  }
   if (e.kind === 'deadline') {
     return `<li class="ev deadline"><span class="ev-mark">!</span><span class="ev-main"><b>${esc(e.project)}</b> 공식 마감</span><span class="ev-date">${fmtMD(e.date)} · ${dday(e.date)}</span></li>`;
   }
@@ -850,11 +870,21 @@ function carryTasks(date, ids) {
   toast(`${moved.length}개 과제를 ${target === todayStr() ? '오늘' : fmtMD(target)}로 옮겼습니다.`);
 }
 
+// 과제 마감일 표시(마감일이 없으면 아무것도 표시하지 않음)
+function dueText(t) {
+  if (!t.due) return '';
+  const n = diffDays(todayStr(), t.due);
+  if (t.done) return `${fmtMD(t.due)} 마감`;
+  return n < 0 ? `마감 ${-n}일 지남` : n === 0 ? '오늘 마감' : n === 1 ? '내일 마감' : `${fmtMD(t.due)} 마감 · D-${n}`;
+}
+const dueCls = t => { if (!t.due || t.done) return ''; const n = diffDays(todayStr(), t.due); return n < 0 ? 'late' : n <= 1 ? 'soon' : ''; };
+const dueTag = t => (t.due ? `<small class="due-tag ${dueCls(t)}">${dueText(t)}</small>` : '');
+
 // 그날 과제 전체를 우선순위 순서대로(완료한 과제는 줄 그어서)
 function miniTasks(d) {
   const list = getTasks(d);
   if (!list.length) return '<span class="muted">—</span>';
-  return `<span class="mini-tasks">${list.map((t, i) => `<span class="mini-item ${t.done ? 'done' : ''}"><span class="rk">${i + 1}</span><span class="mini-text">${esc(t.text)}</span></span>`).join('')}</span>`;
+  return `<span class="mini-tasks">${list.map((t, i) => `<span class="mini-item ${t.done ? 'done' : ''}"><span class="rk">${i + 1}</span><span class="mini-text">${esc(t.text)}${t.due && !t.done ? ` <small class="due-tag ${dueCls(t)}">~${fmtMD(t.due)}</small>` : ''}</span></span>`).join('')}</span>`;
 }
 
 function monthTaskList(first, last) {
@@ -875,6 +905,7 @@ function taskBlock(date) {
       ${field(t, 'text', '과제', '과제 이름')}
       <label class="field"><span>뭘 할지</span><textarea rows="2" data-tfield="memo" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|memo" maxlength="500" placeholder="예: 문제집 42쪽부터 3문제 풀기">${esc(t.memo || '')}</textarea></label>
       ${isTop ? field(t, 'cue', '시작 시점 (선택)', '예: 점심 먹고 책상에 앉으면') : ''}
+      <label class="field"><span>마감일 (선택)</span><span class="time-row"><input type="date" data-tfield="due" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|due" value="${esc(t.due || '')}">${t.due ? `<button type="button" class="link-btn" data-action="t-due-clear" data-date="${date}" data-id="${t.id}">지우기</button>` : ''}</span></label>
       <label class="field"><span>알림 시각 (선택)</span><span class="time-row"><input type="time" data-tfield="alarm" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|alarm" value="${esc(t.alarm || '')}">${t.alarm ? `<button type="button" class="link-btn" data-action="t-alarm-clear" data-date="${date}" data-id="${t.id}">지우기</button>` : ''}</span></label>
       ${projects.length ? `<label class="field"><span>장기 과제</span><select data-change="tlink" data-date="${date}" data-id="${t.id}" data-key="tl|${date}|${t.id}">${linkOptions(t, projects)}</select></label>` : ''}
     </div>
@@ -892,7 +923,7 @@ function taskBlock(date) {
         <button class="drag-handle" type="button" aria-label="끌어서 순서 바꾸기">${GRIP}</button>
         <span class="rank">${i + 1}</span>
         <input type="checkbox" data-change="tdone" data-date="${date}" data-id="${t.id}" ${t.done ? 'checked' : ''} aria-label="${esc(t.text)} 완료">
-        <span class="tr-text">${esc(t.text)}${t.alarm && !t.done ? `<small class="tr-alarm"> ⏰ ${esc(t.alarm)}</small>` : ''}${t.from ? `<small class="muted"> · ${fmtMD(t.from)}에서 넘어옴</small>` : ''}${t.memo && !isTop && !editing ? `<small class="tr-memo">${esc(t.memo)}</small>` : ''}</span>
+        <span class="tr-text">${esc(t.text)}${dueTag(t)}${t.alarm && !t.done ? `<small class="tr-alarm"> ⏰ ${esc(t.alarm)}</small>` : ''}${t.from ? `<small class="muted"> · ${fmtMD(t.from)}에서 넘어옴</small>` : ''}${t.memo && !isTop && !editing ? `<small class="tr-memo">${esc(t.memo)}</small>` : ''}</span>
         <span class="tr-btns">
           <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="우선순위 올리기">↑</button>
           <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="1" ${i === tasks.length - 1 ? 'disabled' : ''} aria-label="우선순위 내리기">↓</button>
@@ -914,6 +945,7 @@ function taskBlock(date) {
     <ol class="task-list" data-sortable="tasks" data-date="${date}">${rows}</ol>` : ''}
     <div class="add-row">
       <input id="t-new-${date}" data-enter="t-add" data-date="${date}" placeholder="${tasks.length ? '과제 추가 (맨 아래 순위로)' : '예: 보고서 서론 쓰기'}" maxlength="120" autocomplete="off" aria-label="과제 추가">
+      <input type="date" id="t-new-due-${date}" class="due-in" aria-label="마감일 (선택)" title="마감일 (선택)">
       <button class="btn primary" data-action="t-add" data-date="${date}">추가</button>
     </div>
     ${tasks.length ? '' : `<p class="muted small">우선순위 순서대로 추가하세요. 맨 위의 끝나지 않은 과제가 '지금 할 과제'가 됩니다.</p>`}`;
@@ -955,7 +987,8 @@ function timerCard(r) {
 function upcomingCard(s) {
   const t = todayStr(), until = addDays(s, 14);
   const ev = eventsBetween('0000-00-00', until)
-    .filter(e => e.date >= s || (s === t && e.kind === 'ms' && !e.done));
+    .filter(e => !(e.kind === 'tdue' && e.done))
+    .filter(e => e.date >= s || (s === t && (e.kind === 'ms' || e.kind === 'tdue') && !e.done));
   if (!ev.length) return '';
   return `<article class="card">
     <div class="card-head"><h2>다가오는 일정</h2><span class="muted small">2주 이내</span></div>
@@ -1011,7 +1044,7 @@ function viewWeek() {
   const n = Math.round(diffDays(curWs, ws) / 7);
   const rows = Array.from({ length: 7 }, (_, i) => {
     const d = addDays(ws, i), r = dayRec(d), dayEv = ev.filter(e => e.date === d);
-    const evText = dayEv.map(e => (e.kind === 'deadline' ? `${esc(e.project)} 마감` : esc(e.title))).join(' · ');
+    const evText = dayEv.map(e => (e.kind === 'deadline' ? `${esc(e.project)} 마감` : e.kind === 'tdue' ? `${esc(e.title)} 마감` : esc(e.title))).join(' · ');
     return `<li><button class="day-row ${d === t ? 'today' : ''}" data-action="goto-day" data-date="${d}">
       <span class="dr-date"><b>${DOW[parse(d).getDay()]}</b>${parse(d).getDate()}</span>
       <span class="dr-main">${miniTasks(d)}${evText ? `<small>${evText}</small>` : ''}</span>
@@ -1030,7 +1063,7 @@ function viewWeek() {
       </div>
     </article>
     ${ev.length ? `<article class="card">
-      <div class="card-head"><h2>장기 과제 일정</h2><span class="muted small">마감에서 역산</span></div>
+      <div class="card-head"><h2>마감 일정</h2><span class="muted small">과제 마감·장기 과제</span></div>
       <ul class="ev-list">${ev.map(evItem).join('')}</ul>
     </article>` : ''}
     <article class="card">
@@ -1067,7 +1100,7 @@ function viewMonth() {
     <article class="card">
       <div class="cal-head">${['월', '화', '수', '목', '금', '토', '일'].map(d => `<span>${d}</span>`).join('')}</div>
       <div class="cal-grid">${cells}</div>
-      <div class="cal-legend"><span><i class="lg lg-start"></i>시작한 날</span><span><i class="lg lg-ms"></i>중간 지점</span><span><i class="lg lg-dl"></i>공식 마감</span></div>
+      <div class="cal-legend"><span><i class="lg lg-start"></i>시작한 날</span><span><i class="lg lg-ms"></i>중간 지점</span><span><i class="lg lg-dl"></i>마감</span></div>
     </article>
     ${monthTaskList(first, last)}
     ${ev.length ? `<article class="card"><div class="card-head"><h2>이 달의 일정</h2></div><ul class="ev-list">${ev.map(evItem).join('')}</ul></article>` : ''}
@@ -1273,8 +1306,8 @@ function alarmCard() {
     </div>`;
   return `<article class="card">
     <div class="card-head"><h2>알림</h2></div>
-    <p class="muted small">과제마다 '알림 시각'을 정할 수 있고, 장기 과제의 중간 지점·공식 마감은 아래 시각에 알려 줍니다. 앱 안 알람은 앱이 열려 있을 때 울리고, 구글 캘린더를 연결하면 앱이 꺼져 있거나 오프라인이어도 캘린더 앱이 알려 줍니다.</p>
-    <div class="alarm-rows">${row('dayBefore', '중간 지점·마감 전날')}${row('sameDay', '중간 지점·마감 당일')}</div>
+    <p class="muted small">과제마다 '알림 시각'을 정할 수 있고, 과제 마감일과 장기 과제의 중간 지점·공식 마감은 아래 시각에 알려 줍니다. 앱 안 알람은 앱이 열려 있을 때 울리고, 구글 캘린더를 연결하면 앱이 꺼져 있거나 오프라인이어도 캘린더 앱이 알려 줍니다.</p>
+    <div class="alarm-rows">${row('dayBefore', '마감·중간 지점 전날')}${row('sameDay', '마감·중간 지점 당일')}</div>
     <div class="fields">
       <label class="check"><input type="checkbox" data-alarm="appSound" ${A.appSound ? 'checked' : ''}><span>앱 안 알람 소리</span></label>
       <label class="check"><input type="checkbox" data-alarm="wakeLock" ${A.wakeLock ? 'checked' : ''}><span>타이머 실행 중 화면 켜 두기 <small class="muted">(화면이 꺼지면 앱 알람이 멈출 수 있어서)</small></span></label>
@@ -1620,6 +1653,7 @@ const actions = {
     try { Notification.requestPermission().then(() => render()); } catch { /* 무시 */ }
   },
   't-alarm-clear'(el) { updateTask(el.dataset.date, el.dataset.id, { alarm: '' }); },
+  't-due-clear'(el) { updateTask(el.dataset.date, el.dataset.id, { due: '' }); },
   'cal-sync'() { calSync({ interactive: true }); },
   'cal-disconnect'() {
     if (!confirm("캘린더 연결을 해제할까요? 구글 캘린더의 '학업 플래너' 캘린더는 그대로 남으니, 필요 없으면 구글 캘린더에서 직접 지워 주세요.")) return;
@@ -1631,8 +1665,10 @@ const actions = {
   't-add'(el) {
     const date = el.dataset.date, inp = document.getElementById(`t-new-${date}`), text = inp?.value.trim();
     if (!text) { inp?.focus(); return; }
+    const dueIn = document.getElementById(`t-new-due-${date}`), due = dueIn?.value || '';
     inp.value = '';
-    setTasks(date, [...getTasks(date), { id: uid(), text, memo: '', cue: '', done: false, projectId: null, milestoneId: null }]);
+    if (dueIn) dueIn.value = '';
+    setTasks(date, [...getTasks(date), { id: uid(), text, memo: '', cue: '', due, done: false, projectId: null, milestoneId: null }]);
   },
   't-move'(el) {
     const { date, id } = el.dataset, list = [...getTasks(date)];
