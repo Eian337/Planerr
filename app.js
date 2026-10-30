@@ -8,7 +8,7 @@ import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timeta
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.7.1';
+const APP_VERSION = '1.7.2';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -1052,30 +1052,41 @@ function timelineCard(date) {
   const items = buildTimeline({ fixed: off ? [] : dayBlocks, tasks, dayStart: R.dayStart, dayEnd: R.dayEnd });
   const isToday = date === todayStr(), nd = new Date(), nowMin = isToday ? nd.getHours() * 60 + nd.getMinutes() : -1;
   const unscheduled = tasks.filter(t => !t.done && toMin(t.start) == null);
-  const rows = items.map(it => {
-    const time = `<span class="tl-time">${toHM(it.s)}<i>${toHM(it.e)}</i></span>`;
-    const cls = `${nowMin >= it.s && nowMin < it.e ? 'now' : ''} ${isToday && it.e <= nowMin ? 'past' : ''}`;
-    if (it.kind === 'fixed') return `<li class="tl-item fixed ${cls}">${time}<span class="tl-body"><b>${esc(it.block.title || '고정 일과')}</b></span></li>`;
-    if (it.kind === 'task') {
-      const t = it.task;
-      return `<li class="tl-item task ${t.done ? 'done' : ''} ${cls}">${time}<span class="tl-body"><b>${esc(t.text)}</b><small>${fmtDur(it.e - it.s)}${it.overlap ? ' · <em>고정 일과와 겹침</em>' : ''}</small></span><button type="button" class="icon-btn sm" data-action="tl-unplace" data-date="${date}" data-id="${t.id}" aria-label="시간표에서 빼기">×</button></li>`;
-    }
-    if (ui.tlOpen === `${date}|${it.s}`) {
-      const e = Math.min(it.e, it.s + 60);
-      return `<li class="tl-item gap open ${cls}">${time}<div class="tl-form">
+  const timeOf = it => `<span class="tl-time">${toHM(it.s)}<i>${toHM(it.e)}</i></span>`;
+  const clsOf = it => `${nowMin >= it.s && nowMin < it.e ? 'now' : ''} ${isToday && it.e <= nowMin ? 'past' : ''}`;
+  const isOpen = g => ui.tlOpen === `${date}|${g.s}`;
+  const taskLi = it => {
+    const t = it.task;
+    return `<li class="tl-item task ${t.done ? 'done' : ''} ${clsOf(it)}">${timeOf(it)}<span class="tl-body"><b>${esc(t.text)}</b><small>${fmtDur(it.e - it.s)}${it.overlap ? ' · <em>다른 과제와 겹침</em>' : ''}</small></span><button type="button" class="icon-btn sm" data-action="tl-unplace" data-date="${date}" data-id="${t.id}" aria-label="시간표에서 빼기">×</button></li>`;
+  };
+  const gapLi = (g, inner) => {
+    if (isOpen(g)) {
+      const e = Math.min(g.e, g.s + 60);
+      return `<li class="tl-item gap open ${clsOf(g)}">${timeOf(g)}<div class="tl-form">
         <select id="tl-task" data-change="tl-sel" aria-label="넣을 과제">${unscheduled.map(t => `<option value="${t.id}">${esc(t.text)}</option>`).join('')}<option value="__new">+ 새 과제</option></select>
         <input id="tl-new" placeholder="새 과제 이름" maxlength="120" autocomplete="off" ${unscheduled.length ? 'hidden' : ''}>
-        <span class="time-row"><input type="time" id="tl-s" value="${toHM(it.s)}" aria-label="시작"><span>~</span><input type="time" id="tl-e" value="${toHM(e)}" aria-label="끝"></span>
+        <span class="time-row"><input type="time" id="tl-s" value="${toHM(g.s)}" aria-label="시작"><span>~</span><input type="time" id="tl-e" value="${toHM(e)}" aria-label="끝"></span>
         <div class="btn-row tight"><button type="button" class="btn sm primary" data-action="tl-place" data-date="${date}">넣기</button><button type="button" class="btn sm" data-action="tl-cancel">취소</button></div>
       </div></li>`;
     }
-    return `<li class="tl-item gap ${cls}">${time}<button type="button" class="tl-add" data-action="tl-open" data-date="${date}" data-s="${it.s}"><span>빈 시간 ${fmtDur(it.e - it.s)}</span><b>+ 과제 넣기</b></button></li>`;
-  }).join('');
+    return `<li class="tl-item gap ${inner ? 'inner' : ''} ${clsOf(g)}">${timeOf(g)}<button type="button" class="tl-add" data-action="tl-open" data-date="${date}" data-s="${g.s}"><span>${inner ? '남은' : '빈'} 시간 ${fmtDur(g.e - g.s)}</span><b>+ 과제 넣기</b></button></li>`;
+  };
+  const blockLi = f => {
+    // 과제가 없는 일과는 머리줄의 버튼으로 넣고, 과제가 있거나 넣는 중이면 일과 안에 과제·남은 시간을 펼쳐 보여 줌
+    const showInner = f.tasks.length > 0 || f.gaps.some(isOpen);
+    const inner = [...f.tasks, ...(f.tasks.length ? f.gaps : f.gaps.filter(isOpen))].sort((x, y) => x.s - y.s);
+    const addBtn = !showInner && f.gaps.length ? `<button type="button" class="tl-mini-add" data-action="tl-open" data-date="${date}" data-s="${f.gaps[0].s}" aria-label="${esc(f.block.title || '고정 일과')}에 과제 넣기">+ 넣기</button>` : '';
+    return `<li class="tl-block ${clsOf(f)}">
+      <div class="tl-item fixed">${timeOf(f)}<span class="tl-body"><b>${esc(f.block.title || '고정 일과')}</b>${f.tasks.length ? `<small>과제 ${f.tasks.length}개</small>` : ''}</span>${addBtn}</div>
+      ${showInner ? `<ol class="tl tl-sub">${inner.map(x => (x.kind === 'task' ? taskLi(x) : gapLi(x, true))).join('')}</ol>` : ''}
+    </li>`;
+  };
+  const rows = items.map(it => (it.kind === 'fixed' ? blockLi(it) : it.kind === 'task' ? taskLi(it) : gapLi(it, false))).join('');
   return `<article class="card tl-card">
     <div class="card-head"><h2>시간표</h2><span class="head-right">${dayBlocks.length ? `<button type="button" class="link-btn" data-action="routine-off" data-date="${date}">${off ? '고정 일과 보이기' : '이 날은 일과 숨기기'}</button>` : ''}<button type="button" class="link-btn" data-action="goto-routine">일과 편집</button></span></div>
     ${R.blocks.length ? '' : `<p class="muted small">설정에서 수업·자습 같은 고정 일과를 요일별로 등록하면, 그 시간을 뺀 빈 시간이 자동으로 보입니다.</p>`}
     <ol class="tl">${rows}</ol>
-    ${unscheduled.length ? `<p class="muted small">시간을 정하지 않은 과제 ${unscheduled.length}개 — 빈 시간을 눌러 넣거나, 과제 편집에서 '할 시간'을 정하세요.</p>` : ''}
+    ${unscheduled.length ? `<p class="muted small">시간을 정하지 않은 과제 ${unscheduled.length}개 — 빈 시간이나 일과의 '+ 넣기'를 눌러 넣거나, 과제 편집에서 '할 시간'을 정하세요.</p>` : ''}
   </article>`;
 }
 

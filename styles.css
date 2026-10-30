@@ -586,3 +586,13 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 .time-row { flex-wrap: wrap; row-gap: 6px; }
 .time-row input[type=time] { min-width: 0; flex: 1 1 110px; max-width: 160px; }
 .time-row .link-btn { white-space: nowrap; }
+
+/* ── 고정 일과 안에 넣은 과제 ── */
+.tl-block { display: flex; flex-direction: column; gap: 4px; background: var(--surface-2); border-radius: 12px; }
+.tl-block > .tl-item.fixed { background: none; }
+.tl-block.now { outline: 2px solid var(--warm); outline-offset: 1px; }
+.tl-block.past { opacity: .55; }
+.tl-sub { padding: 0 6px 6px 18px; gap: 4px; }
+.tl-sub .tl-item.task { background: var(--surface); }
+.tl-item.gap.inner { border-color: color-mix(in srgb, var(--line) 70%, var(--muted)); background: var(--surface); }
+.tl-mini-add { border: 1px solid var(--line); background: var(--surface); color: var(--accent); font-weight: 700; font-size: 12.5px; border-radius: 99px; padding: 4px 10px; white-space: nowrap; }
