@@ -7,7 +7,7 @@ import { GCal, syncCalendar, eventSig, hexId, insertEvent, eventsPath } from './
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -817,11 +817,33 @@ const updateTask = (s, id, patch) => setTasks(s, getTasks(s).map(t => (t.id === 
 const carryTarget = s => (s < todayStr() ? todayStr() : addDays(s, 1));
 const carryLabel = s => (s < todayStr() ? '오늘로 가져오기' : s === todayStr() ? '내일로 넘기기' : '다음 날로 넘기기');
 
+// 지난날 못 끝낸 과제를 오늘 목록 맨 아래로 자동으로 옮김(하루에 한 번, 기기 간 공유되는 표시로 중복 실행 방지)
+// 처음 실행할 때는 어제만, 그 뒤로는 마지막 실행일부터 어제까지(최대 14일) 확인
+function autoCarry() {
+  if (store.status.phase !== 'ready' || settings().autoCarry === false) return;
+  const t = todayStr(), last = store.data.meta.rollover?.last;
+  if (last && last >= t) return;
+  store.set('meta', 'rollover', { last: t }); // 먼저 표시해 두어 다시 들어오지 않게 함
+  const floor = addDays(t, -14);
+  const startD = last ? (last > floor ? last : floor) : addDays(t, -1);
+  const days = Object.keys(store.data.days).filter(d => d >= startD && d < t && getTasks(d).some(x => !x.done)).sort();
+  if (!days.length) return;
+  const moved = [];
+  for (const d of days) {
+    const src = getTasks(d);
+    moved.push(...src.filter(x => !x.done).map(x => ({ ...x, from: x.from || d })));
+    setTasks(d, src.filter(x => x.done));
+  }
+  const dest = getTasks(t), ids = new Set(dest.map(x => x.id));
+  setTasks(t, [...dest, ...moved.map(x => (ids.has(x.id) ? { ...x, id: uid() } : x))]);
+  toast(`못 끝낸 과제 ${moved.length}개를 오늘로 옮겼습니다.`);
+}
+
 function carryTasks(date, ids) {
   if (!ids.length) return;
   const target = carryTarget(date), src = getTasks(date), dest = getTasks(target);
   const destIds = new Set(dest.map(t => t.id));
-  const moved = src.filter(t => ids.includes(t.id)).map(t => ({ ...t, id: destIds.has(t.id) ? uid() : t.id, from: date }));
+  const moved = src.filter(t => ids.includes(t.id)).map(t => ({ ...t, id: destIds.has(t.id) ? uid() : t.id, from: t.from || date }));
   setTasks(target, [...dest, ...moved]);
   setTasks(date, src.filter(t => !ids.includes(t.id)));
   ui.editTask = null;
@@ -1315,6 +1337,10 @@ function viewSettings() {
            <p class="muted small">같은 계정으로 로그인한 모든 기기에서 기록이 이어집니다. 오프라인에서 입력한 내용은 기기에 저장해 두었다가 연결되면 올립니다.</p>
            <div class="btn-row"><button class="btn" data-action="logout">로그아웃</button></div>`
         : `<p class="muted small">Firebase 설정 전이라 이 기기에만 저장됩니다. 설정 안내(README)의 단계를 마치면 기기 간 연동이 켜지고, 그때 이 기기의 기록을 계정으로 옮길 수 있습니다.</p>`}
+    </article>
+    <article class="card">
+      <div class="card-head"><h2>과제</h2></div>
+      <label class="check"><input type="checkbox" data-bind="meta|settings|autoCarry" data-key="meta|settings|autoCarry" ${settings().autoCarry === false ? '' : 'checked'}><span>못 끝낸 과제를 다음 날로 자동으로 넘기기 <small class="muted">(앱을 열 때 지난날 남은 과제를 오늘 목록 맨 아래로 옮김)</small></span></label>
     </article>
     <article class="card">
       <div class="card-head"><h2>오늘 화면의 시작 타이머</h2></div>
@@ -1829,7 +1855,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 store.subscribe(reason => {
-  if (store.status.phase === 'ready') syncTheme();
+  if (store.status.phase === 'ready') { syncTheme(); autoCarry(); }
   if (reason === 'status' && store.status.phase === 'ready') { updateBadge(); return; }
   scheduleRender();
   pipRefresh();
@@ -1849,6 +1875,7 @@ setInterval(() => {
   if (ui.week === weekStart(lastToday)) ui.week = weekStart(t);
   if (ui.month === lastToday.slice(0, 7)) ui.month = t.slice(0, 7);
   lastToday = t;
+  autoCarry();
   scheduleRender();
   pipRefresh();
 }, 30000);
