@@ -516,3 +516,73 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 .add-row .due-in { flex: 0 1 150px; width: auto; }
 .cal-marks i.mk-tdue, .cal-cell.started .cal-marks i.mk-tdue { background: var(--warm); }
 .ev.tdue.late .ev-date { color: var(--danger); font-weight: 700; }
+
+/* ── 과제 세분화 ── */
+.steps { list-style: none; margin: 0 0 4px; padding: 0; display: flex; flex-direction: column; }
+.step { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 0; }
+.step .check { flex: 1; min-width: 0; font-size: 14.5px; }
+.step.done .check span { color: var(--muted); text-decoration: line-through; }
+.add-row.tight { margin-top: 4px; }
+.add-row.tight input { min-height: 38px; padding: 7px 10px; font-size: 15px; }
+.now-task .step .check span { font-size: 15px; }
+.steps-done { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--surface); border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; font-size: 14px; font-weight: 600; color: var(--accent); }
+.stuck { background: var(--warm-soft); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 13.5px; }
+.stuck b { color: var(--warm); }
+.stuck .btn-row { margin-top: 6px; }
+.carry-tag { color: var(--muted); }
+.carry-tag.warn { color: var(--warm); font-weight: 700; }
+.tr-slot { color: var(--accent); font-weight: 700; }
+
+/* ── 시간표 ── */
+.tl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.tl-item { display: grid; grid-template-columns: 50px 1fr auto; align-items: center; gap: 10px; border-radius: 10px; padding: 7px 8px; min-height: 44px; }
+.tl-time { display: flex; flex-direction: column; font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.25; }
+.tl-time i { font-style: normal; font-weight: 500; color: var(--muted); }
+.tl-body { display: flex; flex-direction: column; min-width: 0; font-size: 14.5px; }
+.tl-body small { font-size: 12px; color: var(--muted); }
+.tl-body em { font-style: normal; color: var(--danger); font-weight: 700; }
+.tl-item.fixed { background: var(--surface-2); color: var(--muted); }
+.tl-item.fixed .tl-body b { font-weight: 600; color: var(--text); opacity: .75; }
+.tl-item.task { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.tl-item.task.done .tl-body b { text-decoration: line-through; color: var(--muted); }
+.tl-item.gap { grid-template-columns: 50px 1fr; border: 1.5px dashed var(--line); padding: 4px 8px; }
+.tl-item.gap.open { grid-template-columns: 50px 1fr; border-style: solid; border-color: var(--accent); }
+.tl-add { border: 0; background: none; text-align: left; padding: 6px 0; display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13.5px; color: var(--muted); }
+.tl-add b { color: var(--accent); white-space: nowrap; }
+.tl-item.now { outline: 2px solid var(--warm); outline-offset: 1px; }
+.tl-item.past { opacity: .55; }
+.tl-form { display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
+.tl-form select, .tl-form input { min-height: 38px; padding: 6px 10px; font-size: 15px; }
+.time-row input[type=time] { flex: 0 1 auto; }
+.rt-range { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; font-size: 14px; }
+.rt-range input { width: auto; min-width: 110px; }
+.rt-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.rt-item { background: var(--surface-2); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.rt-row { display: flex; align-items: center; gap: 8px; }
+.rt-item input { background: var(--surface); }
+.rt-days { display: flex; gap: 4px; flex-wrap: wrap; }
+.day-chip { width: 36px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); font-size: 13px; font-weight: 600; color: var(--muted); padding: 0; }
+.day-chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.head-right .link-btn { font-size: 13px; padding: 2px 0; }
+
+/* ── 음악 탭 ── */
+.seg { display: grid; grid-template-columns: 1fr 1fr; background: var(--surface-2); border-radius: 10px; padding: 3px; gap: 3px; }
+.seg button { border: 0; background: none; border-radius: 8px; padding: 8px 6px; font-size: 13.5px; font-weight: 600; color: var(--muted); }
+.seg button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, .08); }
+.round-btn:disabled { opacity: .4; cursor: default; }
+.icon-btn:disabled { opacity: .3; }
+
+/* ── 시작 체크리스트 ── */
+.cl-box { align-items: stretch; text-align: left; }
+.cl-box > b { font-size: 18px; text-align: center; }
+.cl-list { list-style: none; margin: 4px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.cl-list li { background: var(--surface-2); border-radius: 10px; padding: 10px 12px; }
+.cl-list .check { width: 100%; font-size: 15px; }
+.cl-edit { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.cl-edit li { display: flex; align-items: center; gap: 6px; }
+.cl-edit input { min-height: 38px; padding: 7px 10px; font-size: 15px; }
+
+/* 시간 입력 두 칸이 좁은 화면에서 넘치지 않게 */
+.time-row { flex-wrap: wrap; row-gap: 6px; }
+.time-row input[type=time] { min-width: 0; flex: 1 1 110px; max-width: 160px; }
+.time-row .link-btn { white-space: nowrap; }

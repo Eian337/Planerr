@@ -1,16 +1,18 @@
-// 알람 음악 — 올린 음악 파일을 이 기기의 IndexedDB에 저장해 새로고침해도 목록이 남게 합니다.
+// 음악 목록 — 올린 음악 파일을 이 기기의 IndexedDB에 저장해 새로고침해도 목록이 남게 합니다.
+// 목록마다 저장소가 따로 있습니다: 'tracks'(알람 음악), 'study'(공부 플레이리스트)
 // (음악 파일은 용량이 커서 기기 간 동기화하지 않습니다.)
 
 const DB_NAME = 'planner-music';
-const STORE = 'tracks';
-const REPEAT_KEY = 'planner.music.repeat';
+const STORES = ['tracks', 'study'];
 let dbPromise = null;
 
 function openDb() {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, 1);
-      req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: 'id' });
+      const req = indexedDB.open(DB_NAME, 2);
+      req.onupgradeneeded = () => {
+        for (const s of STORES) if (!req.result.objectStoreNames.contains(s)) req.result.createObjectStore(s, { keyPath: 'id' });
+      };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
@@ -18,11 +20,11 @@ function openDb() {
   return dbPromise;
 }
 
-async function withStore(mode, fn) {
+async function withStore(store, mode, fn) {
   const db = await openDb();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, mode);
-    const result = fn(tx.objectStore(STORE));
+    const tx = db.transaction(store, mode);
+    const result = fn(tx.objectStore(store));
     tx.oncomplete = () => resolve(result && 'result' in result ? result.result : undefined);
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error);
@@ -32,13 +34,15 @@ async function withStore(mode, fn) {
 const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
 export class Music {
-  constructor({ onChange, onTime, onError }) {
+  constructor({ store = 'tracks', defaultRepeat = false, onChange, onTime, onError }) {
+    this.store = store;
     this.list = [];          // [{ id, name, url }]
     this.cur = -1;
     this.playing = false;
     this.alarmPlaying = false;
     this.unlocked = false;
-    this.repeat = (() => { try { return localStorage.getItem(REPEAT_KEY) === '1'; } catch { return false; } })();
+    this.repeatKey = store === 'tracks' ? 'planner.music.repeat' : `planner.music.repeat.${store}`;
+    this.repeat = (() => { try { const v = localStorage.getItem(this.repeatKey); return v === null ? defaultRepeat : v === '1'; } catch { return defaultRepeat; } })();
     this.onChange = onChange || (() => {});
     this.onTime = onTime || (() => {});
     this.onError = onError || (() => {});
@@ -54,7 +58,7 @@ export class Music {
 
   async load() {
     try {
-      const rows = (await withStore('readonly', s => s.getAll())) || [];
+      const rows = (await withStore(this.store, 'readonly', s => s.getAll())) || [];
       rows.sort((a, b) => a.order - b.order);
       this.list = rows.map(t => ({ id: t.id, name: t.name, url: URL.createObjectURL(t.blob) }));
     } catch (e) {
@@ -69,7 +73,7 @@ export class Music {
     for (const file of files) {
       const id = newId();
       try {
-        await withStore('readwrite', s => s.put({ id, name: file.name, blob: file, order: order++ }));
+        await withStore(this.store, 'readwrite', s => s.put({ id, name: file.name, blob: file, order: order++ }));
       } catch (e) {
         console.warn(e);
         failed++;
@@ -83,7 +87,7 @@ export class Music {
 
   _saveOrder() {
     const ids = this.list.map(t => t.id);
-    withStore('readwrite', s => {
+    withStore(this.store, 'readwrite', s => {
       ids.forEach((id, i) => {
         const g = s.get(id);
         g.onsuccess = () => { if (g.result) { g.result.order = i; s.put(g.result); } };
@@ -119,7 +123,7 @@ export class Music {
     else if (this.cur > i) this.cur--;
     URL.revokeObjectURL(t.url);
     this.list.splice(i, 1);
-    withStore('readwrite', s => s.delete(t.id)).catch(e => console.warn(e));
+    withStore(this.store, 'readwrite', s => s.delete(t.id)).catch(e => console.warn(e));
     this._saveOrder();
     this.onChange();
   }
@@ -146,12 +150,27 @@ export class Music {
 
   toggleRepeat() {
     this.repeat = !this.repeat;
-    try { localStorage.setItem(REPEAT_KEY, this.repeat ? '1' : '0'); } catch { /* 무시 */ }
+    try { localStorage.setItem(this.repeatKey, this.repeat ? '1' : '0'); } catch { /* 무시 */ }
     this.onChange();
   }
 
   seek(frac) {
     if (Number.isFinite(this.aud.duration) && this.aud.duration > 0) this.aud.currentTime = frac * this.aud.duration;
+  }
+
+  // 공부 플레이리스트용: 멈춘 곳부터 이어서 재생 / 일시정지
+  resume() {
+    if (!this.list.length || this.playing) return Promise.resolve(this.playing);
+    if (this.cur < 0 || this.cur >= this.list.length || !this.aud.src) return this.play(0);
+    this.aud.muted = false;
+    return this.aud.play().then(() => { this.playing = true; this.onChange(); return true; }).catch(() => false);
+  }
+
+  pause() {
+    if (!this.playing) return;
+    this.aud.pause();
+    this.playing = false;
+    this.onChange();
   }
 
   // 아이폰·아이패드는 사용자가 누르지 않은 상태에서 소리를 막으므로, 타이머 시작 버튼을 누를 때 미리 허락을 받아 둠

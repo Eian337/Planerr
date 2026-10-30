@@ -2,7 +2,7 @@
 // 온라인이면 항상 새 파일을 먼저 받아 오므로(네트워크 우선), GitHub에 올린 업데이트는
 // 다음에 온라인 상태로 앱을 열 때 반영됩니다. 파일을 추가하면 아래 SHELL 목록에도 넣어 주세요.
 
-const VERSION = 'v1.6.0';
+const VERSION = 'v1.7.0';
 const CACHE = `study-planner-${VERSION}`;
 const SHELL = [
   './',
@@ -13,6 +13,7 @@ const SHELL = [
   './theme.js',
   './music.js',
   './calendar.js',
+  './timetable.js',
   './config.js',
   './vendor/firebase.js',
   './manifest.webmanifest',

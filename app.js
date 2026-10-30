@@ -4,10 +4,11 @@ import { applyTheme, cachedTheme, cacheTheme, PRESETS, COLOR_DEFS, rgb } from '.
 import { Music } from './music.js';
 import * as CFG from './config.js';
 import { GCal, syncCalendar, eventSig, hexId, insertEvent, eventsPath } from './calendar.js';
+import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timetable.js';
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -49,6 +50,9 @@ const ui = {
   editTask: null,
   alarms: [],
   musicOpen: false,
+  musicTab: 'alarm',
+  tlOpen: null,
+  checklist: null,
   themeDraft: null,
 };
 
@@ -151,8 +155,10 @@ function tick() {
   checkAlarms();
   if (mtRunning() && mtRemain() <= 0) mtFinish();
   else updateMainTimerDom();
+  if (study.playing && !studyActive()) study.pause();
   if (timer && timer.phase === 'warm' && elapsed() >= timer.warmMs) {
     timer.accMs = timer.warmMs; timer.segStart = null; timer.phase = 'prompt';
+    study.pause();
     if (document.hidden) timer.chimePending = true; else chime();
     saveTimer();
     scheduleRender();
@@ -196,6 +202,27 @@ const music = new Music({
   },
   onError: msg => toast(msg),
 });
+const study = new Music({
+  store: 'study',
+  defaultRepeat: true,
+  onChange: () => scheduleRender(),
+  onTime: (cur, dur) => {
+    const ok = Number.isFinite(dur) && dur > 0;
+    const seek = document.getElementById('study-seek');
+    if (seek && ok && document.activeElement !== seek) seek.value = String(Math.round((cur / dur) * 1000));
+    const c = document.getElementById('study-cur');
+    if (c) c.textContent = fmtT(cur);
+    const d = document.getElementById('study-dur');
+    if (d && ok) d.textContent = fmtT(dur);
+  },
+  onError: msg => toast(msg),
+});
+// 공부 플레이리스트: 어느 타이머든 돌고 있을 때만 재생, 멈추면 같이 멈춤
+const studyActive = () => mtRunning() || !!(timer && (timer.phase === 'warm' || timer.phase === 'flow'));
+function syncStudy() {
+  if (studyActive() && !music.alarmPlaying) { if (!study.playing && study.list.length) study.resume(); }
+  else if (study.playing) study.pause();
+}
 
 const MKEY = 'planner.mtimer.v1';
 const MT_R = 108, MT_C = 2 * Math.PI * MT_R;
@@ -246,6 +273,7 @@ function mtToggle() {
   }
   mtSave(); scheduleRender(); pipRefresh();
   if (mtRunning()) calTimerUpsert();
+  syncStudy();
 }
 
 function mtReset() {
@@ -256,6 +284,7 @@ function mtReset() {
   const t = mt.setMs > 0 ? mt.setMs : MT_DEFAULT;
   Object.assign(mt, { status: 'ready', endTime: null, alarm: false, totalMs: t, remainMs: t });
   mtSave(); scheduleRender(); pipRefresh();
+  syncStudy();
 }
 
 function mtAdd(sec) {
@@ -336,6 +365,7 @@ function mtFinish(silent = false) {
     mtEndSession();
     calTimerRemove();
   } else {
+    study.pause();
     music.playAlarm().then(ok => { if (!ok) playMelody(); });
     const task = topTask(todayStr())?.text;
     notify('⏰ 타이머 종료', task ? `${task} — 설정한 시간이 됐어요.` : '설정한 시간이 됐어요.');
@@ -406,8 +436,10 @@ function alarmSchedule() {
   for (const date of Object.keys(store.data.days)) {
     if (date < from) continue;
     for (const task of getTasks(date)) {
-      if (task.done || !task.alarm) continue;
-      out.push({ kind: 'task', key: `t|${date}|${task.id}`, at: atTime(date, task.alarm), title: task.text, body: task.memo || '' });
+      const when = task.alarm || task.start;
+      if (task.done || !when) continue;
+      const slot = toMin(task.start) != null ? [atTime(date, task.start), atTime(date, toHM(Math.min(taskEnd(task), 1439)))] : null;
+      out.push({ kind: 'task', key: `t|${date}|${task.id}`, at: atTime(date, when), slot, title: task.text, body: task.memo || '' });
     }
   }
   const marks = [];
@@ -432,7 +464,7 @@ function alarmSchedule() {
 function alarmTriggers() {
   const out = [];
   for (const it of alarmSchedule()) {
-    if (it.kind === 'task') out.push({ id: `${it.key}|${it.at}`, at: it.at, title: it.title, body: it.body || '과제 알림 시각입니다.' });
+    if (it.kind === 'task') out.push({ id: `${it.key}|${it.at}`, at: it.at, title: it.title, body: it.body || '과제를 시작할 시간입니다.' });
     else for (const r of it.reminders) out.push({ id: `${it.key}|${r}`, at: r, title: `${r < it.at - 3600000 ? '내일' : '오늘'} ${it.what}`, body: it.title });
   }
   return out;
@@ -481,8 +513,10 @@ let calBusy = false, calAutoTimer = 0;
 
 function calDesired() {
   return alarmSchedule().map(it => {
-    const task = it.kind === 'task', start = it.at, end = start + (task ? 15 : 30) * 60000;
-    const minutes = task ? [0] : [...new Set(it.reminders.map(r => Math.max(0, Math.round((start - r) / 60000))))].slice(0, 5);
+    const task = it.kind === 'task';
+    const start = task && it.slot ? it.slot[0] : it.at;
+    const end = task && it.slot ? Math.max(it.slot[1], start + 5 * 60000) : start + (task ? 15 : 30) * 60000;
+    const minutes = task ? [Math.max(0, Math.round((start - it.at) / 60000))] : [...new Set(it.reminders.map(r => Math.max(0, Math.round((start - r) / 60000))))].slice(0, 5);
     return {
       id: hexId(`pl|${it.key}`),
       summary: task ? `📚 ${it.title}` : it.what === '공식 마감' ? `⚑ ${it.title} 공식 마감` : it.what === '과제 마감' ? `⚑ ${it.title} 마감` : `◆ ${it.title} (중간 지점)`,
@@ -622,6 +656,7 @@ function pipBuild() {
     .q.done .qt{color:${c.muted};text-decoration:line-through}
     .qt{word-break:keep-all;overflow-wrap:anywhere}
     .al{font-size:11px;color:${c.warm};font-weight:700;white-space:nowrap}
+    .ns{font-size:12px;color:${c.accent};font-weight:700;padding:0 6px 4px 29px}
     .du{font-size:11px;color:${c.muted};white-space:nowrap} .du.soon{color:${c.warm};font-weight:700} .du.late{color:${c.danger};font-weight:700}
     .empty{color:${c.muted};margin:0;padding:8px 6px}
     .proj{margin-top:6px;padding:6px 0 0;border-top:1px dashed ${c.line}}
@@ -648,7 +683,11 @@ function pipBuild() {
     .pill.main{background:${c.accent};border-color:${c.accent};color:${c.ink}}
   </style>`;
 
-  const rows = tasks.map(t => `<li><button class="q ${t.done ? 'done' : ''} ${t === top ? 'top' : ''}" data-id="${t.id}" title="${t.done ? '완료 취소' : '완료로 표시'}"><span class="box">${t.done ? '✓' : ''}</span><span class="qt">${esc(t.text)}${t.due && !t.done ? ` <span class="du ${dueCls(t)}">${dueText(t)}</span>` : ''}${t.alarm && !t.done ? ` <span class="al">⏰${esc(t.alarm)}</span>` : ''}</span></button></li>`).join('');
+  const rows = tasks.map(t => {
+    const st = stepsOf(t), next = st.find(x => !x.done);
+    return `<li><button class="q ${t.done ? 'done' : ''} ${t === top ? 'top' : ''}" data-id="${t.id}" title="${t.done ? '완료 취소' : '완료로 표시'}"><span class="box">${t.done ? '✓' : ''}</span><span class="qt">${esc(t.text)}${t.due && !t.done ? ` <span class="du ${dueCls(t)}">${dueText(t)}</span>` : ''}${t.start && !t.done ? ` <span class="al">🕒${esc(t.start)}</span>` : ''}${t.alarm && !t.done ? ` <span class="al">⏰${esc(t.alarm)}</span>` : ''}${st.length && !t.done ? ` <span class="du">${st.filter(x => x.done).length}/${st.length}</span>` : ''}</span></button></li>`
+      + (t === top && next ? `<li class="ns">▸ 다음 단계: ${esc(next.text)}</li>` : '');
+  }).join('');
   const proj = activeProjects()
     .map(p => ({ p, next: sortedMs(p).find(m => !m.done) }))
     .filter(x => x.next || x.p.deadline)
@@ -851,7 +890,7 @@ function autoCarry() {
   const moved = [];
   for (const d of days) {
     const src = getTasks(d);
-    moved.push(...src.filter(x => !x.done).map(x => ({ ...x, from: x.from || d })));
+    moved.push(...src.filter(x => !x.done).map(x => ({ ...x, from: x.from || d, start: '', end: '' })));
     setTasks(d, src.filter(x => x.done));
   }
   const dest = getTasks(t), ids = new Set(dest.map(x => x.id));
@@ -863,7 +902,7 @@ function carryTasks(date, ids) {
   if (!ids.length) return;
   const target = carryTarget(date), src = getTasks(date), dest = getTasks(target);
   const destIds = new Set(dest.map(t => t.id));
-  const moved = src.filter(t => ids.includes(t.id)).map(t => ({ ...t, id: destIds.has(t.id) ? uid() : t.id, from: t.from || date }));
+  const moved = src.filter(t => ids.includes(t.id)).map(t => ({ ...t, id: destIds.has(t.id) ? uid() : t.id, from: t.from || date, start: '', end: '' }));
   setTasks(target, [...dest, ...moved]);
   setTasks(date, src.filter(t => !ids.includes(t.id)));
   ui.editTask = null;
@@ -904,7 +943,9 @@ function taskBlock(date) {
   const details = (t, isTop) => `<div class="fields">
       ${field(t, 'text', '과제', '과제 이름')}
       <label class="field"><span>뭘 할지</span><textarea rows="2" data-tfield="memo" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|memo" maxlength="500" placeholder="예: 문제집 42쪽부터 3문제 풀기">${esc(t.memo || '')}</textarea></label>
+      ${stepsField(date, t)}
       ${isTop ? field(t, 'cue', '시작 시점 (선택)', '예: 점심 먹고 책상에 앉으면') : ''}
+      ${slotField(date, t)}
       <label class="field"><span>마감일 (선택)</span><span class="time-row"><input type="date" data-tfield="due" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|due" value="${esc(t.due || '')}">${t.due ? `<button type="button" class="link-btn" data-action="t-due-clear" data-date="${date}" data-id="${t.id}">지우기</button>` : ''}</span></label>
       <label class="field"><span>알림 시각 (선택)</span><span class="time-row"><input type="time" data-tfield="alarm" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|alarm" value="${esc(t.alarm || '')}">${t.alarm ? `<button type="button" class="link-btn" data-action="t-alarm-clear" data-date="${date}" data-id="${t.id}">지우기</button>` : ''}</span></label>
       ${projects.length ? `<label class="field"><span>장기 과제</span><select data-change="tlink" data-date="${date}" data-id="${t.id}" data-key="tl|${date}|${t.id}">${linkOptions(t, projects)}</select></label>` : ''}
@@ -913,6 +954,8 @@ function taskBlock(date) {
   const focus = top
     ? `<div class="now-task">
         <div class="now-head"><span class="now-label">${date === todayStr() ? '지금 할 과제' : '먼저 할 과제'} · ${tasks.indexOf(top) + 1}순위</span><label class="check"><input type="checkbox" data-change="tdone" data-date="${date}" data-id="${top.id}" aria-label="지금 할 과제 완료"><span>완료</span></label></div>
+        ${stuckBox(date, top)}
+        ${stepsOf(top).length && stepsOf(top).every(x => x.done) ? `<div class="steps-done"><span>모든 단계를 끝냈습니다.</span><button type="button" class="btn sm primary" data-action="step-done-task" data-date="${date}" data-id="${top.id}">과제 완료</button></div>` : ''}
         ${details(top, true)}
       </div>`
     : tasks.length ? `<p class="all-done">✓ 모든 과제를 끝냈습니다</p>` : '';
@@ -923,7 +966,7 @@ function taskBlock(date) {
         <button class="drag-handle" type="button" aria-label="끌어서 순서 바꾸기">${GRIP}</button>
         <span class="rank">${i + 1}</span>
         <input type="checkbox" data-change="tdone" data-date="${date}" data-id="${t.id}" ${t.done ? 'checked' : ''} aria-label="${esc(t.text)} 완료">
-        <span class="tr-text">${esc(t.text)}${dueTag(t)}${t.alarm && !t.done ? `<small class="tr-alarm"> ⏰ ${esc(t.alarm)}</small>` : ''}${t.from ? `<small class="muted"> · ${fmtMD(t.from)}에서 넘어옴</small>` : ''}${t.memo && !isTop && !editing ? `<small class="tr-memo">${esc(t.memo)}</small>` : ''}</span>
+        <span class="tr-text">${esc(t.text)}${rowTags(date, t, isTop, editing)}</span>
         <span class="tr-btns">
           <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="우선순위 올리기">↑</button>
           <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="1" ${i === tasks.length - 1 ? 'disabled' : ''} aria-label="우선순위 내리기">↓</button>
@@ -931,7 +974,7 @@ function taskBlock(date) {
         </span>
       </div>
       ${editing ? `<div class="tr-edit">
-        ${isTop ? '' : details(t, false)}
+        ${isTop ? '' : stuckBox(date, t) + details(t, false)}
         <div class="btn-row wrap">
           ${t.done ? '' : `<button class="btn sm" data-action="t-carry" data-date="${date}" data-id="${t.id}">${carryLabel(date)}</button>`}
           <button class="btn sm danger" data-action="t-del" data-date="${date}" data-id="${t.id}">삭제</button>
@@ -949,6 +992,141 @@ function taskBlock(date) {
       <button class="btn primary" data-action="t-add" data-date="${date}">추가</button>
     </div>
     ${tasks.length ? '' : `<p class="muted small">우선순위 순서대로 추가하세요. 맨 위의 끝나지 않은 과제가 '지금 할 과제'가 됩니다.</p>`}`;
+}
+
+/* ───────── 과제 세분화·넘어온 과제·할 시간 ───────── */
+const stepsOf = t => (Array.isArray(t.steps) ? t.steps : []);
+function updateSteps(date, id, fn) {
+  const t = getTasks(date).find(x => x.id === id);
+  if (t) updateTask(date, id, { steps: fn([...stepsOf(t)]) });
+}
+const nthDay = (t, date) => (t.from ? diffDays(t.from, date) + 1 : 1);
+const fmtDur = min => (min >= 60 ? `${Math.floor(min / 60)}시간${min % 60 ? ` ${min % 60}분` : ''}` : `${min}분`);
+
+function stepsField(date, t) {
+  const st = stepsOf(t), dn = st.filter(x => x.done).length;
+  return `<div class="field"><span>단계${st.length ? ` · ${dn}/${st.length}` : ' (선택) — 작게 쪼갤수록 시작하기 쉬워집니다'}</span>
+    ${st.length ? `<ul class="steps">${st.map(x => `<li class="step ${x.done ? 'done' : ''}">
+      <label class="check"><input type="checkbox" data-change="step-toggle" data-date="${date}" data-id="${t.id}" data-sid="${x.id}" ${x.done ? 'checked' : ''}><span>${esc(x.text)}</span></label>
+      <button type="button" class="icon-btn sm" data-action="step-del" data-date="${date}" data-id="${t.id}" data-sid="${x.id}" aria-label="단계 삭제">×</button></li>`).join('')}</ul>` : ''}
+    <div class="add-row tight"><input id="st-new-${date}-${t.id}" data-enter="step-add" data-date="${date}" data-id="${t.id}" placeholder="${st.length ? '단계 추가' : '예: 자료 3개 찾기'}" maxlength="100" autocomplete="off" aria-label="단계 추가"><button type="button" class="btn sm" data-action="step-add" data-date="${date}" data-id="${t.id}">추가</button></div>
+  </div>`;
+}
+
+function slotField(date, t) {
+  const a = f => `data-tfield="${f}" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|${f}"`;
+  return `<div class="field"><span>할 시간 (선택) — 시간표에 표시되고 시작 시각에 알림</span>
+    <span class="time-row"><input type="time" ${a('start')} value="${esc(t.start || '')}" aria-label="시작 시각"><span>~</span><input type="time" ${a('end')} value="${esc(t.end || '')}" aria-label="끝 시각">${t.start ? `<button type="button" class="link-btn" data-action="t-slot-clear" data-date="${date}" data-id="${t.id}">지우기</button>` : ''}</span>
+  </div>`;
+}
+
+function stuckBox(date, t) {
+  const n = nthDay(t, date);
+  if (t.done || n < 4) return '';
+  return `<div class="stuck">
+    <b>${n}일째 넘어오고 있습니다.</b>
+    <span>막막하거나 지루한 과제일 수 있습니다. 첫 단계를 아주 작게 쪼개거나, 마감·시간을 다시 정하거나, 필요 없다면 버려도 됩니다.</span>
+    <div class="btn-row wrap tight">
+      <button type="button" class="btn sm" data-action="stuck-split" data-date="${date}" data-id="${t.id}">단계로 쪼개기</button>
+      <button type="button" class="btn sm" data-action="stuck-replan" data-date="${date}" data-id="${t.id}">다시 정하기</button>
+      <button type="button" class="btn sm danger" data-action="t-del" data-date="${date}" data-id="${t.id}">버리기</button>
+    </div>
+  </div>`;
+}
+
+function rowTags(date, t, isTop, editing) {
+  const st = stepsOf(t), dn = st.filter(x => x.done).length;
+  return `${dueTag(t)}`
+    + `${t.start && !t.done ? `<small class="tr-slot"> 🕒 ${esc(t.start)}${t.end ? `–${esc(t.end)}` : ''}</small>` : ''}`
+    + `${t.alarm && !t.done ? `<small class="tr-alarm"> ⏰ ${esc(t.alarm)}</small>` : ''}`
+    + `${st.length ? `<small class="muted"> · 단계 ${dn}/${st.length}</small>` : ''}`
+    + `${t.from ? `<small class="carry-tag ${nthDay(t, date) >= 4 && !t.done ? 'warn' : ''}"> · ${fmtMD(t.from)}부터 ${nthDay(t, date)}일째</small>` : ''}`
+    + `${t.memo && !isTop && !editing ? `<small class="tr-memo">${esc(t.memo)}</small>` : ''}`;
+}
+
+/* ───────── 시간표 ───────── */
+function timelineCard(date) {
+  const R = routineOf(settings().routine), rec = dayRec(date), off = !!rec.routineOff;
+  const dayBlocks = R.blocks.filter(b => (b.days || []).includes(isoDow(parse(date))));
+  const tasks = getTasks(date);
+  const items = buildTimeline({ fixed: off ? [] : dayBlocks, tasks, dayStart: R.dayStart, dayEnd: R.dayEnd });
+  const isToday = date === todayStr(), nd = new Date(), nowMin = isToday ? nd.getHours() * 60 + nd.getMinutes() : -1;
+  const unscheduled = tasks.filter(t => !t.done && toMin(t.start) == null);
+  const rows = items.map(it => {
+    const time = `<span class="tl-time">${toHM(it.s)}<i>${toHM(it.e)}</i></span>`;
+    const cls = `${nowMin >= it.s && nowMin < it.e ? 'now' : ''} ${isToday && it.e <= nowMin ? 'past' : ''}`;
+    if (it.kind === 'fixed') return `<li class="tl-item fixed ${cls}">${time}<span class="tl-body"><b>${esc(it.block.title || '고정 일과')}</b></span></li>`;
+    if (it.kind === 'task') {
+      const t = it.task;
+      return `<li class="tl-item task ${t.done ? 'done' : ''} ${cls}">${time}<span class="tl-body"><b>${esc(t.text)}</b><small>${fmtDur(it.e - it.s)}${it.overlap ? ' · <em>고정 일과와 겹침</em>' : ''}</small></span><button type="button" class="icon-btn sm" data-action="tl-unplace" data-date="${date}" data-id="${t.id}" aria-label="시간표에서 빼기">×</button></li>`;
+    }
+    if (ui.tlOpen === `${date}|${it.s}`) {
+      const e = Math.min(it.e, it.s + 60);
+      return `<li class="tl-item gap open ${cls}">${time}<div class="tl-form">
+        <select id="tl-task" data-change="tl-sel" aria-label="넣을 과제">${unscheduled.map(t => `<option value="${t.id}">${esc(t.text)}</option>`).join('')}<option value="__new">+ 새 과제</option></select>
+        <input id="tl-new" placeholder="새 과제 이름" maxlength="120" autocomplete="off" ${unscheduled.length ? 'hidden' : ''}>
+        <span class="time-row"><input type="time" id="tl-s" value="${toHM(it.s)}" aria-label="시작"><span>~</span><input type="time" id="tl-e" value="${toHM(e)}" aria-label="끝"></span>
+        <div class="btn-row tight"><button type="button" class="btn sm primary" data-action="tl-place" data-date="${date}">넣기</button><button type="button" class="btn sm" data-action="tl-cancel">취소</button></div>
+      </div></li>`;
+    }
+    return `<li class="tl-item gap ${cls}">${time}<button type="button" class="tl-add" data-action="tl-open" data-date="${date}" data-s="${it.s}"><span>빈 시간 ${fmtDur(it.e - it.s)}</span><b>+ 과제 넣기</b></button></li>`;
+  }).join('');
+  return `<article class="card tl-card">
+    <div class="card-head"><h2>시간표</h2><span class="head-right">${dayBlocks.length ? `<button type="button" class="link-btn" data-action="routine-off" data-date="${date}">${off ? '고정 일과 보이기' : '이 날은 일과 숨기기'}</button>` : ''}<button type="button" class="link-btn" data-action="goto-routine">일과 편집</button></span></div>
+    ${R.blocks.length ? '' : `<p class="muted small">설정에서 수업·자습 같은 고정 일과를 요일별로 등록하면, 그 시간을 뺀 빈 시간이 자동으로 보입니다.</p>`}
+    <ol class="tl">${rows}</ol>
+    ${unscheduled.length ? `<p class="muted small">시간을 정하지 않은 과제 ${unscheduled.length}개 — 빈 시간을 눌러 넣거나, 과제 편집에서 '할 시간'을 정하세요.</p>` : ''}
+  </article>`;
+}
+
+function saveRoutine(R) { store.set('meta', 'settings', { routine: R }); }
+function routineCopy() { const R = routineOf(settings().routine); return { ...R, blocks: R.blocks.map(b => ({ ...b, days: [...(b.days || [])] })) }; }
+
+function routineCard() {
+  const R = routineOf(settings().routine), W = ['월', '화', '수', '목', '금', '토', '일'];
+  return `<article class="card" id="routine-card">
+    <div class="card-head"><h2>고정 일과</h2><span class="muted small">시간표의 회색 칸</span></div>
+    <p class="muted small">수업·자습·식사처럼 요일마다 반복되는 시간을 등록하세요. 오늘 화면의 시간표에서 이 시간을 뺀 빈 시간에 과제를 넣을 수 있습니다.</p>
+    <div class="rt-range"><span>하루 시작</span><input type="time" data-routine="dayStart" value="${esc(R.dayStart)}" aria-label="하루 시작"><span>끝</span><input type="time" data-routine="dayEnd" value="${esc(R.dayEnd)}" aria-label="하루 끝"></div>
+    ${R.blocks.length ? `<ul class="rt-list">${R.blocks.map(b => `<li class="rt-item">
+      <div class="rt-row"><input data-routine="title" data-id="${b.id}" data-key="rt|${b.id}|title" value="${esc(b.title || '')}" placeholder="예: 수업" maxlength="40" aria-label="일과 이름"><button type="button" class="icon-btn sm" data-action="routine-del" data-id="${b.id}" aria-label="일과 삭제">×</button></div>
+      <div class="rt-row"><span class="time-row"><input type="time" data-routine="start" data-id="${b.id}" value="${esc(b.start)}" aria-label="시작"><span>~</span><input type="time" data-routine="end" data-id="${b.id}" value="${esc(b.end)}" aria-label="끝"></span></div>
+      <div class="rt-days">${W.map((w, i) => { const on = (b.days || []).includes(i + 1); return `<button type="button" class="day-chip ${on ? 'on' : ''}" data-action="routine-day" data-id="${b.id}" data-d="${i + 1}" aria-pressed="${on}">${w}</button>`; }).join('')}</div>
+    </li>`).join('')}</ul>` : ''}
+    <div class="btn-row"><button type="button" class="btn" data-action="routine-add">+ 일과 추가</button></div>
+  </article>`;
+}
+
+/* ───────── 공부 시작 체크리스트 ───────── */
+const CL_DEFAULT = ['휴대폰은 손 닿지 않는 곳에', '필요한 자료·파일 펴 두기', '물 준비', '지금 할 과제와 단계 확인'];
+function checklistSet() {
+  const c = settings().checklist || {};
+  return { on: c.on !== false, items: Array.isArray(c.items) ? c.items : CL_DEFAULT };
+}
+function saveChecklist(C) { store.set('meta', 'settings', { checklist: { on: C.on, items: C.items } }); }
+// 시작 동작 앞에 체크리스트를 띄움(끄면 바로 실행)
+function gateStart(fn) {
+  const C = checklistSet();
+  if (C.on && C.items.length) { ui.checklist = { fn, checked: {} }; render(); }
+  else fn();
+}
+function checklistOverlay() {
+  if (!ui.checklist || mt.alarm || ui.alarms.length) return '';
+  const C = checklistSet();
+  return `<div class="alarm-ov" role="dialog" aria-label="시작 전 확인"><div class="alarm-box cl-box">
+    <b>시작 전 확인</b>
+    <ul class="cl-list">${C.items.map((it, i) => `<li><label class="check"><input type="checkbox" data-change="cl-check" data-i="${i}" ${ui.checklist.checked[i] ? 'checked' : ''}><span>${esc(it)}</span></label></li>`).join('')}</ul>
+    <div class="btn-col"><button type="button" class="btn primary" data-action="cl-go">시작</button><button type="button" class="btn" data-action="cl-cancel">취소</button></div>
+  </div></div>`;
+}
+function checklistCard() {
+  const C = checklistSet();
+  return `<article class="card">
+    <div class="card-head"><h2>공부 시작 체크리스트</h2></div>
+    <label class="check"><input type="checkbox" data-cl="on" ${C.on ? 'checked' : ''}><span>시작할 때마다 체크리스트 띄우기 <small class="muted">(시작 타이머·타이머 탭·'타이머 없이 시작했어요')</small></span></label>
+    <ul class="cl-edit">${C.items.map((it, i) => `<li><input data-cl="item" data-i="${i}" data-key="cl|${i}" value="${esc(it)}" maxlength="60" aria-label="체크리스트 항목"><button type="button" class="icon-btn sm" data-action="cl-del" data-i="${i}" aria-label="항목 삭제">×</button></li>`).join('')}</ul>
+    <div class="add-row tight"><input id="cl-new" data-enter="cl-add" placeholder="항목 추가" maxlength="60" autocomplete="off" aria-label="체크리스트 항목 추가"><button type="button" class="btn sm" data-action="cl-add">추가</button></div>
+  </article>`;
 }
 
 /* ───────── 오늘(일) 화면 ───────── */
@@ -1024,6 +1202,7 @@ function viewDay() {
     ${isToday
       ? timerCard(r)
       : `<article class="card slim"><label class="check"><input type="checkbox" data-bind="days|${s}|started" data-key="days|${s}|started" ${r.started ? 'checked' : ''}><span>이 날 시작한 것으로 표시</span></label></article>`}
+    ${timelineCard(s)}
     ${isToday ? `<article class="card">
       <div class="card-head"><h2>내일 과제 정하기</h2><span class="muted small">${fmtMDW(tomorrow)}</span></div>
       ${taskBlock(tomorrow)}
@@ -1201,33 +1380,38 @@ function offerCard() {
 }
 
 function musicCard() {
-  const L = music.list, open = ui.musicOpen;
-  const tracks = L.map((t, i) => `<li class="track ${i === music.cur ? 'active' : ''}" data-sort-id="${t.id}">
+  const kind = ui.musicTab === 'study' ? 'study' : 'alarm', M = kind === 'study' ? study : music, L = M.list, open = ui.musicOpen;
+  const pre = kind === 'study' ? 'study' : 'music', locked = kind === 'study' && !studyActive();
+  const tracks = L.map((t, i) => `<li class="track ${i === M.cur ? 'active' : ''}" data-sort-id="${t.id}">
       <button class="drag-handle" type="button" aria-label="끌어서 순서 바꾸기">${GRIP}</button><span class="tn">${i + 1}</span><span class="tname" title="${esc(t.name)}">${esc(t.name)}</span>
       <span class="tbtns">
-        <button class="icon-btn sm" data-action="music-move" data-i="${i}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="위로">↑</button>
-        <button class="icon-btn sm" data-action="music-move" data-i="${i}" data-dir="1" ${i === L.length - 1 ? 'disabled' : ''} aria-label="아래로">↓</button>
-        <button class="icon-btn sm" data-action="music-play" data-i="${i}" aria-label="재생">▶</button>
-        <button class="icon-btn sm" data-action="music-del" data-i="${i}" aria-label="삭제">×</button>
+        <button class="icon-btn sm" data-action="music-move" data-m="${kind}" data-i="${i}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="위로">↑</button>
+        <button class="icon-btn sm" data-action="music-move" data-m="${kind}" data-i="${i}" data-dir="1" ${i === L.length - 1 ? 'disabled' : ''} aria-label="아래로">↓</button>
+        <button class="icon-btn sm" data-action="music-play" data-m="${kind}" data-i="${i}" ${locked ? 'disabled' : ''} aria-label="재생">▶</button>
+        <button class="icon-btn sm" data-action="music-del" data-m="${kind}" data-i="${i}" aria-label="삭제">×</button>
       </span></li>`).join('');
+  const hint = kind === 'study'
+    ? '어느 타이머든 돌고 있을 때만 재생되고, 멈추면 같이 멈춥니다. 공부할 때만 듣는 음악으로 정해 두면 시작 신호가 됩니다.'
+    : '타이머가 끝나면 첫 곡부터 재생됩니다. 비워 두면 기본 알림음이 울립니다.';
   return `<article class="card music">
-    <button class="music-head" data-action="music-open" aria-expanded="${open}"><span aria-hidden="true">🎵</span><b>알람 음악</b><span class="muted small">${L.length ? `${L.length}곡` : '기본 알림음'}</span><i class="chev">${open ? '−' : '+'}</i></button>
+    <button class="music-head" data-action="music-open" aria-expanded="${open}"><span aria-hidden="true">🎵</span><b>음악</b><span class="muted small">알람 ${music.list.length ? `${music.list.length}곡` : '기본음'} · 공부 ${study.list.length}곡${study.playing ? ' · 재생 중' : ''}</span><i class="chev">${open ? '−' : '+'}</i></button>
     ${open ? `<div class="music-body">
-      <p class="muted small">타이머가 끝나면 첫 곡부터 재생됩니다. 비워 두면 기본 알림음이 울립니다. 올린 음악은 이 기기에 저장됩니다.</p>
+      <div class="seg" role="tablist"><button type="button" class="${kind === 'alarm' ? 'on' : ''}" data-action="music-tab" data-t="alarm" role="tab" aria-selected="${kind === 'alarm'}">알람 음악</button><button type="button" class="${kind === 'study' ? 'on' : ''}" data-action="music-tab" data-t="study" role="tab" aria-selected="${kind === 'study'}">공부 플레이리스트</button></div>
+      <p class="muted small">${hint} 올린 음악은 이 기기에만 저장됩니다.</p>
       <div class="btn-row tight wrap">
-        <label class="btn file-btn">+ 파일 추가<input type="file" id="music-file" accept="audio/*" multiple hidden></label>
-        <button class="btn" data-action="music-repeat">${music.repeat ? '반복 켜짐' : '반복 꺼짐'}</button>
+        <label class="btn file-btn">+ 파일 추가<input type="file" id="${pre}-file" accept="audio/*" multiple hidden></label>
+        <button class="btn" data-action="music-repeat" data-m="${kind}">${M.repeat ? '반복 켜짐' : '반복 꺼짐'}</button>
       </div>
-      ${L.length ? `<ul class="track-list" data-sortable="music">${tracks}</ul>
+      ${L.length ? `<ul class="track-list" data-sortable="music" data-m="${kind}">${tracks}</ul>
       <div class="player">
         <div class="player-btns">
-          <button class="round-btn sm" data-action="music-prev" aria-label="이전 곡">⏮</button>
-          <button class="round-btn main sm" data-action="music-toggle" aria-label="재생/일시정지">${music.playing ? ICON_PAUSE : ICON_PLAY}</button>
-          <button class="round-btn sm" data-action="music-next" aria-label="다음 곡">⏭</button>
+          <button class="round-btn sm" data-action="music-prev" data-m="${kind}" ${locked ? 'disabled' : ''} aria-label="이전 곡">⏮</button>
+          <button class="round-btn main sm" data-action="music-toggle" data-m="${kind}" ${locked ? 'disabled' : ''} aria-label="재생/일시정지">${M.playing ? ICON_PAUSE : ICON_PLAY}</button>
+          <button class="round-btn sm" data-action="music-next" data-m="${kind}" ${locked ? 'disabled' : ''} aria-label="다음 곡">⏭</button>
         </div>
-        <div class="now">${music.cur >= 0 && L[music.cur] ? esc(L[music.cur].name) : '트랙 없음'}</div>
-        <input type="range" id="music-seek" min="0" max="1000" value="0" aria-label="재생 위치">
-        <div class="time-row"><span id="music-cur">0:00</span><span id="music-dur">0:00</span></div>
+        <div class="now">${locked ? '타이머가 돌 때 재생됩니다' : M.cur >= 0 && L[M.cur] ? esc(L[M.cur].name) : '트랙 없음'}</div>
+        <input type="range" id="${pre}-seek" min="0" max="1000" value="0" aria-label="재생 위치">
+        <div class="time-row"><span id="${pre}-cur">0:00</span><span id="${pre}-dur">0:00</span></div>
       </div>` : `<p class="muted small">파일을 추가하면 여기에 표시됩니다.</p>`}
     </div>` : ''}
   </article>`;
@@ -1375,6 +1559,8 @@ function viewSettings() {
       <div class="card-head"><h2>과제</h2></div>
       <label class="check"><input type="checkbox" data-bind="meta|settings|autoCarry" data-key="meta|settings|autoCarry" ${settings().autoCarry === false ? '' : 'checked'}><span>못 끝낸 과제를 다음 날로 자동으로 넘기기 <small class="muted">(앱을 열 때 지난날 남은 과제를 오늘 목록 맨 아래로 옮김)</small></span></label>
     </article>
+    ${routineCard()}
+    ${checklistCard()}
     <article class="card">
       <div class="card-head"><h2>오늘 화면의 시작 타이머</h2></div>
       <label class="field inline"><span>시작 타이머 길이(분)</span><input type="number" min="1" max="120" inputmode="numeric" data-bind="meta|settings|timerMin" data-key="meta|settings|timerMin" value="${timerMin()}"></label>
@@ -1467,6 +1653,7 @@ function shell() {
     <main class="main ${ui.view === 'month' ? 'wide' : ''}">${views[ui.view]()}</main>
     ${alarmOverlay()}
     ${appAlarmOverlay()}
+    ${checklistOverlay()}
   </div>`;
 }
 
@@ -1547,28 +1734,32 @@ const actions = {
   'goto-week'(el) { ui.view = 'week'; ui.week = weekStart(el.dataset.date); render(); scrollTop(); },
 
   'timer-start'() {
-    ensureAudio();
-    const t = todayStr();
-    timer = { date: t, phase: 'warm', warmMs: timerMin() * 60000, accMs: 0, segStart: Date.now() };
-    saveTimer();
-    if (!dayRec(t).started) store.set('days', t, { started: true, startedAt: Date.now() });
-    else render();
+    gateStart(() => {
+      ensureAudio();
+      const t = todayStr();
+      timer = { date: t, phase: 'warm', warmMs: timerMin() * 60000, accMs: 0, segStart: Date.now() };
+      saveTimer();
+      syncStudy();
+      if (!dayRec(t).started) store.set('days', t, { started: true, startedAt: Date.now() });
+      else render();
+    });
   },
   'timer-continue'() {
     if (!timer) return;
     ensureAudio();
     timer.phase = 'flow'; timer.segStart = Date.now(); timer.chimePending = false;
-    saveTimer(); render();
+    saveTimer(); syncStudy(); render();
   },
   'timer-stop'() {
     if (!timer) return;
     const min = Math.round(elapsed() / 60000), d = timer.date;
     timer = null; saveTimer();
+    syncStudy();
     if (min > 0) store.set('days', d, { focusMin: (dayRec(d).focusMin || 0) + min });
     else render();
     toast(min > 0 ? `${min}분을 기록했습니다.` : '시작한 것으로 기록했습니다.');
   },
-  'mark-started'() { store.set('days', todayStr(), { started: true, startedAt: Date.now() }); },
+  'mark-started'() { gateStart(() => store.set('days', todayStr(), { started: true, startedAt: Date.now() })); },
 
   'goal-add'() {
     const inp = document.getElementById('goal-new');
@@ -1654,6 +1845,77 @@ const actions = {
   },
   't-alarm-clear'(el) { updateTask(el.dataset.date, el.dataset.id, { alarm: '' }); },
   't-due-clear'(el) { updateTask(el.dataset.date, el.dataset.id, { due: '' }); },
+  't-slot-clear'(el) { updateTask(el.dataset.date, el.dataset.id, { start: '', end: '' }); },
+  'step-add'(el) {
+    const { date, id } = el.dataset, inp = document.getElementById(`st-new-${date}-${id}`), text = inp?.value.trim();
+    if (!text) { inp?.focus(); return; }
+    inp.value = '';
+    updateSteps(date, id, s => [...s, { id: uid(), text, done: false }]);
+  },
+  'step-del'(el) { updateSteps(el.dataset.date, el.dataset.id, s => s.filter(x => x.id !== el.dataset.sid)); },
+  'step-done-task'(el) { updateTask(el.dataset.date, el.dataset.id, { done: true }); },
+  'stuck-split'(el) {
+    const { date, id } = el.dataset;
+    if (topTask(date)?.id !== id) ui.editTask = `${date}|${id}`;
+    render();
+    document.getElementById(`st-new-${date}-${id}`)?.focus();
+  },
+  'stuck-replan'(el) {
+    const { date, id } = el.dataset;
+    if (topTask(date)?.id !== id) ui.editTask = `${date}|${id}`;
+    updateTask(date, id, { from: '' });
+    render();
+    document.querySelector(`[data-key="t|${date}|${id}|due"]`)?.focus();
+    toast('오늘부터 다시 셉니다. 마감일이나 할 시간을 다시 정해 보세요.');
+  },
+  'tl-open'(el) { ui.tlOpen = `${el.dataset.date}|${el.dataset.s}`; render(); },
+  'tl-cancel'() { ui.tlOpen = null; render(); },
+  'tl-place'(el) {
+    const date = el.dataset.date, v = id => document.getElementById(id)?.value || '';
+    const sel = v('tl-task'), s = v('tl-s'), e = v('tl-e');
+    if (toMin(s) == null || toMin(e) == null || toMin(e) <= toMin(s)) return toast('끝 시각이 시작보다 늦어야 합니다.');
+    if (sel && sel !== '__new') updateTask(date, sel, { start: s, end: e });
+    else {
+      const text = v('tl-new').trim();
+      if (!text) { document.getElementById('tl-new')?.focus(); return toast('새 과제 이름을 적어 주세요.'); }
+      setTasks(date, [...getTasks(date), { id: uid(), text, memo: '', cue: '', due: '', start: s, end: e, done: false, projectId: null, milestoneId: null }]);
+    }
+    ui.tlOpen = null;
+    askNotify();
+    render();
+  },
+  'tl-unplace'(el) { updateTask(el.dataset.date, el.dataset.id, { start: '', end: '' }); },
+  'routine-off'(el) { const d = el.dataset.date; store.set('days', d, { routineOff: !dayRec(d).routineOff }); },
+  'goto-routine'() { ui.view = 'settings'; render(); document.getElementById('routine-card')?.scrollIntoView({ block: 'start' }); },
+  'routine-add'() {
+    const R = routineCopy(), id = uid();
+    R.blocks.push({ id, title: '', start: '08:30', end: '12:30', days: [1, 2, 3, 4, 5] });
+    saveRoutine(R);
+    render();
+    document.querySelector(`[data-key="rt|${id}|title"]`)?.focus();
+  },
+  'routine-del'(el) {
+    const R = routineCopy(), b = R.blocks.find(x => x.id === el.dataset.id);
+    if (!b || !confirm(`'${b.title || '이름 없는 일과'}'을(를) 지울까요?`)) return;
+    R.blocks = R.blocks.filter(x => x.id !== b.id);
+    saveRoutine(R);
+  },
+  'routine-day'(el) {
+    const R = routineCopy(), b = R.blocks.find(x => x.id === el.dataset.id), d = Number(el.dataset.d);
+    if (!b) return;
+    b.days = b.days.includes(d) ? b.days.filter(x => x !== d) : [...b.days, d].sort();
+    saveRoutine(R);
+  },
+  'cl-go'() { const c = ui.checklist; ui.checklist = null; render(); c?.fn(); },
+  'cl-cancel'() { ui.checklist = null; render(); },
+  'cl-add'() {
+    const inp = document.getElementById('cl-new'), text = inp?.value.trim();
+    if (!text) { inp?.focus(); return; }
+    inp.value = '';
+    const C = checklistSet();
+    saveChecklist({ ...C, items: [...C.items, text] });
+  },
+  'cl-del'(el) { const C = checklistSet(); saveChecklist({ ...C, items: C.items.filter((_, i) => i !== Number(el.dataset.i)) }); },
   'cal-sync'() { calSync({ interactive: true }); },
   'cal-disconnect'() {
     if (!confirm("캘린더 연결을 해제할까요? 구글 캘린더의 '학업 플래너' 캘린더는 그대로 남으니, 필요 없으면 구글 캘린더에서 직접 지워 주세요.")) return;
@@ -1687,7 +1949,7 @@ const actions = {
   't-carry'(el) { carryTasks(el.dataset.date, [el.dataset.id]); },
   't-carry-all'(el) { const date = el.dataset.date; carryTasks(date, getTasks(date).filter(t => !t.done).map(t => t.id)); },
 
-  'mt-toggle'() { mtToggle(); },
+  'mt-toggle'() { if (!mtRunning() && (mt.status === 'ready' || mt.status === 'done')) gateStart(() => mtToggle()); else mtToggle(); },
   'mt-reset'() { mtReset(); },
   'mt-add'() { mtAdd(60); },
   'mt-preset'(el) { mtPreset(Number(el.dataset.min)); },
@@ -1696,16 +1958,17 @@ const actions = {
   'mt-norecord'() { mt.offer = null; mtSave(); scheduleRender(); },
   'mt-pip'() { togglePip(); },
   'music-open'() { ui.musicOpen = !ui.musicOpen; render(); },
-  'music-repeat'() { music.toggleRepeat(); },
-  'music-move'(el) { music.move(Number(el.dataset.i), Number(el.dataset.dir)); },
-  'music-play'(el) { music.play(Number(el.dataset.i)); },
+  'music-tab'(el) { ui.musicTab = el.dataset.t; render(); },
+  'music-repeat'(el) { mOf(el).toggleRepeat(); },
+  'music-move'(el) { mOf(el).move(Number(el.dataset.i), Number(el.dataset.dir)); },
+  'music-play'(el) { if (studyLocked(el)) return; mOf(el).play(Number(el.dataset.i)); },
   'music-del'(el) {
-    const i = Number(el.dataset.i), t = music.list[i];
-    if (t && confirm(`'${t.name}'을(를) 목록에서 지울까요?`)) music.remove(i);
+    const M = mOf(el), i = Number(el.dataset.i), t = M.list[i];
+    if (t && confirm(`'${t.name}'을(를) 목록에서 지울까요?`)) M.remove(i);
   },
-  'music-toggle'() { music.toggle(); },
-  'music-prev'() { music.prev(); },
-  'music-next'() { music.next(); },
+  'music-toggle'(el) { if (studyLocked(el)) return; mOf(el).toggle(); },
+  'music-prev'(el) { if (studyLocked(el)) return; mOf(el).prev(); },
+  'music-next'(el) { if (studyLocked(el)) return; mOf(el).next(); },
   'theme-preset'(el) {
     const p = PRESETS.find(x => x.id === el.dataset.id);
     if (!p) return;
@@ -1715,6 +1978,13 @@ const actions = {
   'theme-auto'() { ui.themeDraft = null; saveTheme({ mode: 'auto' }); },
 };
 
+const mOf = el => (el.dataset.m === 'study' ? study : music);
+function studyLocked(el) {
+  if (el.dataset.m !== 'study' || studyActive()) return false;
+  toast('공부 플레이리스트는 타이머가 돌 때만 재생됩니다.');
+  return true;
+}
+
 const changeActions = {
   tfield(el) {
     const { date, id } = el.dataset, f = el.dataset.tfield, v = el.value.trim();
@@ -1722,8 +1992,18 @@ const changeActions = {
     if (!t) return;
     if (f === 'text' && !v) { render(); return; } // 과제 이름은 비울 수 없음
     if ((t[f] || '') === v) return;
-    updateTask(date, id, { [f]: v });
+    const patch = { [f]: v };
+    // 할 시간: 시작만 정하면 끝은 1시간 뒤로, 끝이 시작보다 빠르면 거절
+    if (f === 'start' && v && (toMin(t.end) == null || toMin(t.end) <= toMin(v))) patch.end = toHM(Math.min(toMin(v) + 60, 1439));
+    if (f === 'start' && !v) patch.end = '';
+    if (f === 'end' && v && toMin(t.start) != null && toMin(v) <= toMin(t.start)) { toast('끝 시각이 시작보다 늦어야 합니다.'); render(); return; }
+    if (f === 'end' && v && toMin(t.start) == null) { toast('시작 시각을 먼저 정해 주세요.'); render(); return; }
+    updateTask(date, id, patch);
+    if (f === 'start' && v) askNotify();
   },
+  'step-toggle'(el) { updateSteps(el.dataset.date, el.dataset.id, s => s.map(x => (x.id === el.dataset.sid ? { ...x, done: el.checked } : x))); },
+  'tl-sel'(el) { const n = document.getElementById('tl-new'); if (n) { n.hidden = el.value !== '__new'; if (!n.hidden) n.focus(); } },
+  'cl-check'(el) { if (ui.checklist) ui.checklist.checked[el.dataset.i] = el.checked; },
   tdone(el) { updateTask(el.dataset.date, el.dataset.id, { done: el.checked }); },
   tlink(el) {
     const { date, id } = el.dataset, [pid, mid] = el.value.split('::');
@@ -1746,7 +2026,7 @@ function sortCommit(list, ids) {
     const date = list.dataset.date, cur = getTasks(date);
     setTasks(date, ids.map(id => cur.find(t => t.id === id)).filter(Boolean));
   } else if (list.dataset.sortable === 'music') {
-    music.reorder(ids);
+    (list.dataset.m === 'study' ? study : music).reorder(ids);
   }
 }
 
@@ -1840,7 +2120,38 @@ $app.addEventListener('click', e => {
 
 $app.addEventListener('change', e => {
   const el = e.target;
-  if (el.id === 'music-file') { if (el.files?.length) music.add([...el.files]); el.value = ''; return; }
+  if (el.id === 'music-file' || el.id === 'study-file') { if (el.files?.length) (el.id === 'study-file' ? study : music).add([...el.files]); el.value = ''; return; }
+  if (el.dataset.routine) {
+    const R = routineCopy(), f = el.dataset.routine, v = el.value.trim();
+    if (f === 'dayStart' || f === 'dayEnd') {
+      if (!v) { render(); return; }
+      R[f] = v;
+      if (toMin(R.dayEnd) <= toMin(R.dayStart)) { toast('하루 끝이 시작보다 늦어야 합니다.'); render(); return; }
+    } else {
+      const b = R.blocks.find(x => x.id === el.dataset.id);
+      if (!b) return;
+      if ((f === 'start' || f === 'end') && !v) { render(); return; }
+      if (f === 'start' && toMin(b.end) <= toMin(v)) {
+        // 시작을 끝보다 늦게 옮기면 길이를 유지한 채 끝도 함께 옮김
+        const dur = toMin(b.end) - toMin(b.start) > 0 ? toMin(b.end) - toMin(b.start) : 60;
+        b.end = toHM(Math.min(toMin(v) + dur, 1439));
+      }
+      b[f] = v;
+      if (toMin(b.end) <= toMin(b.start)) { toast('끝 시각이 시작보다 늦어야 합니다.'); render(); return; }
+    }
+    saveRoutine(R);
+    return;
+  }
+  if (el.dataset.cl) {
+    const C = checklistSet();
+    if (el.dataset.cl === 'on') saveChecklist({ ...C, on: el.checked });
+    else {
+      const i = Number(el.dataset.i), v = el.value.trim(), items = [...C.items];
+      if (v) items[i] = v; else items.splice(i, 1);
+      saveChecklist({ ...C, items });
+    }
+    return;
+  }
   if (el.dataset.color) { commitThemeDraft(); return; }
   if ('mtInput' in el.dataset) return;
   if (el.dataset.tfield) { changeActions.tfield(el); if (el.dataset.tfield === 'alarm' && el.value) askNotify(); return; }
@@ -1868,6 +2179,7 @@ $app.addEventListener('input', e => {
   if ('mtInput' in el.dataset) { mtFromInputs(); return; }
   if (el.dataset.color) { themeInput(el); return; }
   if (el.id === 'music-seek') music.seek(Number(el.value) / 1000);
+  if (el.id === 'study-seek') study.seek(Number(el.value) / 1000);
 });
 
 $app.addEventListener('keydown', e => {
@@ -1928,6 +2240,7 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
 
 if (mtRunning() && mt.endTime <= Date.now()) mtFinish(true); // 앱이 꺼진 사이 끝난 타이머
 music.load();
+study.load();
 if (gcal.available && navigator.onLine) gcal.loadGis().catch(() => {}); // 버튼을 누르는 순간 바로 연결 창을 열 수 있게 미리 불러 둠
 render();
 store.init();
