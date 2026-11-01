@@ -1,14 +1,15 @@
 // 학업 플래너 — 화면과 동작
 import { Store } from './store.js';
 import { applyTheme, cachedTheme, cacheTheme, PRESETS, COLOR_DEFS, rgb } from './theme.js';
-import { Music } from './music.js';
+import { Player, cacheGet, cachePut, cacheDelete, cacheIds, legacyTracks, legacyClear } from './music.js';
+import { ensureFolder, uploadFile, downloadFile, deleteFile } from './drive.js';
 import * as CFG from './config.js';
-import { GCal, syncCalendar, eventSig, hexId, insertEvent, eventsPath } from './calendar.js';
+import { GCal, syncCalendar, eventSig, hexId, insertEvent, eventsPath, CAL_SCOPE, DRIVE_SCOPE } from './calendar.js';
 import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timetable.js';
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.7.2';
+const APP_VERSION = '1.8.0';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -50,7 +51,10 @@ const ui = {
   editTask: null,
   alarms: [],
   musicOpen: false,
-  musicTab: 'alarm',
+  plOpen: null,
+  libPick: false,
+  libAll: false,
+  musicProgress: '',
   tlOpen: null,
   checklist: null,
   themeDraft: null,
@@ -189,37 +193,27 @@ function updateTimerDom() {
 
 /* ───────── 타이머 탭 (기존 Personal-Timer 기능 이식) ───────── */
 const fmtT = s => `${Math.floor(s / 60)}:${pad(Math.floor(s % 60))}`;
-const music = new Music({
-  onChange: () => scheduleRender(),
-  onTime: (cur, dur) => {
-    const ok = Number.isFinite(dur) && dur > 0;
-    const seek = document.getElementById('music-seek');
-    if (seek && ok && document.activeElement !== seek) seek.value = String(Math.round((cur / dur) * 1000));
-    const c = document.getElementById('music-cur');
-    if (c) c.textContent = fmtT(cur);
-    const d = document.getElementById('music-dur');
-    if (d && ok) d.textContent = fmtT(dur);
-  },
-  onError: msg => toast(msg),
-});
-const study = new Music({
-  store: 'study',
-  defaultRepeat: true,
-  onChange: () => scheduleRender(),
-  onTime: (cur, dur) => {
-    const ok = Number.isFinite(dur) && dur > 0;
-    const seek = document.getElementById('study-seek');
-    if (seek && ok && document.activeElement !== seek) seek.value = String(Math.round((cur / dur) * 1000));
-    const c = document.getElementById('study-cur');
-    if (c) c.textContent = fmtT(cur);
-    const d = document.getElementById('study-dur');
-    if (d && ok) d.textContent = fmtT(dur);
-  },
-  onError: msg => toast(msg),
-});
-// 공부 플레이리스트: 어느 타이머든 돌고 있을 때만 재생, 멈추면 같이 멈춤
+/* ───────── 음악: 플레이리스트(여러 개) ─────────
+   플리·곡 정보는 Firebase로 기기 간 동기화되고, 음악 파일은 구글 드라이브를 거쳐 기기마다 받아 저장(오프라인 재생 가능)
+   재생기: 공부용(study), 타이머 알람용(music), 플리 미리 듣기용(preview) */
+function musicTime(p, cur, dur) {
+  if (p !== uiPlayer()) return;
+  const ok = Number.isFinite(dur) && dur > 0;
+  const seek = document.getElementById('mp-seek');
+  if (seek && ok && document.activeElement !== seek) seek.value = String(Math.round((cur / dur) * 1000));
+  const c = document.getElementById('mp-cur');
+  if (c) c.textContent = fmtT(cur);
+  const d = document.getElementById('mp-dur');
+  if (d && ok) d.textContent = fmtT(dur);
+}
+const music = new Player({ onChange: () => scheduleRender(), onTime: (c, d) => musicTime(music, c, d) });
+const study = new Player({ onChange: () => scheduleRender(), onTime: (c, d) => musicTime(study, c, d) });
+const preview = new Player({ onChange: () => scheduleRender(), onTime: (c, d) => musicTime(preview, c, d) });
+
+// 공부 플리: 어느 타이머든 돌고 있을 때만 재생, 멈추면 같이 멈춤
 const studyActive = () => mtRunning() || !!(timer && (timer.phase === 'warm' || timer.phase === 'flow'));
 function syncStudy() {
+  if (studyActive() && preview.playing) preview.pause();
   if (studyActive() && !music.alarmPlaying) { if (!study.playing && study.list.length) study.resume(); }
   else if (study.playing) study.pause();
 }
@@ -548,11 +542,11 @@ function calPending() {
 async function calSync({ interactive = false } = {}) {
   if (calBusy || !gcal.available || (!interactive && !calConnected())) return;
   if (!navigator.onLine) { if (interactive) toast('오프라인이라 캘린더에 보낼 수 없습니다. 연결되면 다시 눌러 주세요.'); return; }
-  if (!gcal.hasToken && !interactive) return;
+  if (!gcal.hasScope(CAL_SCOPE) && !interactive) return;
   calBusy = true;
   scheduleRender();
   try {
-    if (!gcal.hasToken) await gcal.authorize();
+    if (!gcal.hasScope(CAL_SCOPE)) await gcal.authorize();
     let calId = calMeta().calendarId;
     const newCal = async () => { calId = await gcal.createCalendar(BASE_TITLE, TZ); store.set('meta', 'calendar', { calendarId: calId, synced: [] }); };
     if (!calId) await newCal();
@@ -582,12 +576,12 @@ async function calSync({ interactive = false } = {}) {
 
 function scheduleCalAuto() {
   clearTimeout(calAutoTimer);
-  calAutoTimer = setTimeout(() => { if (calConnected() && gcal.hasToken && navigator.onLine && calPending()) calSync(); }, 2500);
+  calAutoTimer = setTimeout(() => { if (calConnected() && gcal.hasScope(CAL_SCOPE) && navigator.onLine && calPending()) calSync(); }, 2500);
 }
 
 // 타이머 종료 시각도 캘린더에(권한이 살아 있고 온라인일 때만, 기기별)
 function calTimerUpsert() {
-  if (!calConnected() || !gcal.hasToken || !navigator.onLine || !mtRunning() || !mt.endTime) return;
+  if (!calConnected() || !gcal.hasScope(CAL_SCOPE) || !navigator.onLine || !mtRunning() || !mt.endTime) return;
   const fresh = !mt.calEventId;
   if (fresh) { mt.calEventId = hexId(`tm|${deviceId}|${Date.now()}`); mtSave(); }
   const base = eventsPath(calMeta().calendarId), st = mt.endTime;
@@ -607,8 +601,211 @@ function calTimerRemove() {
   if (!id) return;
   mt.calEventId = null;
   mtSave();
-  if (!calConnected() || !gcal.hasToken || !navigator.onLine) return; // 못 지우면 다음 반영 때 정리됨
+  if (!calConnected() || !gcal.hasScope(CAL_SCOPE) || !navigator.onLine) return; // 못 지우면 다음 반영 때 정리됨
   gcal.api('DELETE', `${eventsPath(calMeta().calendarId)}/${id}`).catch(() => {});
+}
+
+/* ───────── 음악 라이브러리(플리 정보·기기 저장·드라이브) ───────── */
+const musicMeta = () => store.data.meta.music || {};
+const libTracks = () => musicMeta().tracks || [];
+const libPlaylists = () => musicMeta().playlists || [];
+const trackById = id => libTracks().find(t => t.id === id) || null;
+const plById = id => (id ? libPlaylists().find(p => p.id === id) || null : null);
+const saveMusic = patch => store.set('meta', 'music', patch);
+const clonePls = () => libPlaylists().map(p => ({ ...p, items: [...(p.items || [])] }));
+const fmtSize = b => (b >= 1048576 ? `${(b / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round((b || 0) / 1024))}KB`);
+let cachedIds = new Set();
+const objUrls = new Map();
+async function trackUrl(id) {
+  if (objUrls.has(id)) return objUrls.get(id);
+  const blob = await cacheGet(id).catch(() => null);
+  if (!blob) return null;
+  const u = URL.createObjectURL(blob);
+  objUrls.set(id, u);
+  return u;
+}
+const openPl = () => plById(ui.plOpen) || plById(musicMeta().studyPl) || libPlaylists()[0] || null;
+// 화면의 재생 버튼이 다루는 재생기: 열어 둔 플리가 공부 플리면 공부용, 아니면 미리 듣기용
+function uiPlayer() { const p = openPl(); return p && p.id === musicMeta().studyPl ? study : preview; }
+function mpLocked() {
+  if (uiPlayer() !== study || studyActive()) return false;
+  toast('공부 플리는 타이머가 돌 때만 재생됩니다.');
+  return true;
+}
+
+let refreshing = null, refreshAgain = false;
+async function refreshPlayers() {
+  if (refreshing) { refreshAgain = true; return; }
+  refreshing = (async () => {
+    const build = async pl => {
+      const out = [];
+      for (const id of pl?.items || []) {
+        const t = trackById(id);
+        if (!t || !cachedIds.has(id)) continue;
+        const url = await trackUrl(id);
+        if (url) out.push({ id, name: t.name, url });
+      }
+      return out;
+    };
+    const m = musicMeta(), sp = plById(m.studyPl), ap = plById(m.alarmPl), op = openPl();
+    study.setList(await build(sp), sp ? sp.repeat !== false : true);
+    music.setList(await build(ap), ap ? ap.repeat !== false : false);
+    preview.setList(op && op.id !== m.studyPl ? await build(op) : [], op ? op.repeat !== false : false);
+  })();
+  try { await refreshing; } catch (e) { console.warn(e); } finally {
+    refreshing = null;
+    if (refreshAgain) { refreshAgain = false; refreshPlayers(); }
+  }
+}
+
+// v1.7 이전에 이 기기에만 있던 알람 음악·공부 플리를 새 플리로 옮김(기기마다 한 번)
+let migrating = false;
+async function migrateLegacyMusic() {
+  if (migrating) return;
+  try { if (localStorage.getItem('planner.music.migrated.v1')) return; } catch { return; }
+  migrating = true;
+  try {
+    const [alarmRows, studyRows] = await Promise.all([legacyTracks('tracks'), legacyTracks('study')]);
+    if (alarmRows.length || studyRows.length) {
+      const tracks = [...libTracks()], playlists = clonePls(), patch = {};
+      for (const [rows, name, key, repeat] of [[alarmRows, '알람 음악', 'alarmPl', false], [studyRows, '공부 플레이리스트', 'studyPl', true]]) {
+        if (!rows.length) continue;
+        const pl = { id: uid(), name, items: [], repeat };
+        for (const r of rows) {
+          const id = uid();
+          await cachePut(id, r.blob);
+          cachedIds.add(id);
+          tracks.push({ id, name: r.name, size: r.blob.size || 0, type: r.blob.type || 'audio/mpeg', driveId: null, origin: deviceId, addedAt: Date.now() });
+          pl.items.push(id);
+        }
+        playlists.push(pl);
+        if (!musicMeta()[key]) patch[key] = pl.id;
+      }
+      saveMusic({ tracks, playlists, ...patch });
+      await legacyClear('tracks');
+      await legacyClear('study');
+      toast('이 기기에 있던 음악을 플레이리스트로 옮겼습니다.');
+    }
+    try { localStorage.setItem('planner.music.migrated.v1', '1'); } catch { /* 무시 */ }
+  } catch (e) {
+    console.warn('음악 옮기기 실패', e);
+  } finally {
+    migrating = false;
+    refreshPlayers();
+  }
+}
+
+async function addFilesToPl(plId, files) {
+  const tracks = [...libTracks()], playlists = clonePls(), pl = playlists.find(p => p.id === plId);
+  if (!pl) return;
+  let failed = 0;
+  for (const f of files) {
+    const id = uid();
+    try { await cachePut(id, f); } catch { failed++; continue; }
+    cachedIds.add(id);
+    tracks.push({ id, name: f.name, size: f.size || 0, type: f.type || 'audio/mpeg', driveId: null, origin: deviceId, addedAt: Date.now() });
+    pl.items.push(id);
+  }
+  saveMusic({ tracks, playlists });
+  try { navigator.storage?.persist?.(); } catch { /* 무시 */ }
+  if (failed) toast(`저장 공간이 부족해 ${failed}곡을 추가하지 못했습니다.`);
+  refreshPlayers();
+  scheduleDriveAuto();
+}
+
+function deleteTrack(id) {
+  const t = trackById(id);
+  if (!t) return;
+  const pend = [...(musicMeta().pendingDeletes || [])];
+  if (t.driveId) pend.push(t.driveId);
+  saveMusic({ tracks: libTracks().filter(x => x.id !== id), playlists: clonePls().map(p => ({ ...p, items: p.items.filter(x => x !== id) })), pendingDeletes: pend });
+  cacheDelete(id).catch(() => {});
+  cachedIds.delete(id);
+  if (objUrls.has(id)) { URL.revokeObjectURL(objUrls.get(id)); objUrls.delete(id); }
+  refreshPlayers();
+  scheduleDriveAuto();
+}
+
+// 이 기기에 받아 둘 곡: 공부·알람 플리, 그리고 '이 기기에 받기'를 누른 플리
+const KEEP_KEY = 'planner.music.keep.v1';
+const keepPls = () => { try { return JSON.parse(localStorage.getItem(KEEP_KEY)) || []; } catch { return []; } };
+function wantedIds() {
+  const m = musicMeta(), ids = new Set();
+  for (const pid of [m.studyPl, m.alarmPl, ...keepPls()]) for (const id of plById(pid)?.items || []) ids.add(id);
+  return [...ids];
+}
+function driveWork() {
+  return {
+    up: libTracks().filter(t => !t.driveId && t.origin === deviceId && cachedIds.has(t.id)),
+    down: wantedIds().filter(id => !cachedIds.has(id) && trackById(id)?.driveId),
+    del: musicMeta().pendingDeletes || [],
+  };
+}
+
+let driveBusy = false, driveAutoTimer = 0;
+async function driveSync({ interactive = false } = {}) {
+  if (driveBusy || !gcal.available) return;
+  if (!navigator.onLine) { if (interactive) toast('오프라인이라 드라이브와 주고받을 수 없습니다.'); return; }
+  const w = driveWork();
+  if (!w.up.length && !w.down.length && !w.del.length) { if (interactive) toast('주고받을 음악이 없습니다.'); return; }
+  if (!gcal.hasScope(DRIVE_SCOPE) && !interactive) return;
+  driveBusy = true;
+  scheduleRender();
+  try {
+    if (!gcal.hasScope(DRIVE_SCOPE)) {
+      await gcal.authorize();
+      if (!gcal.hasScope(DRIVE_SCOPE)) { toast('드라이브 권한을 허용해야 기기 사이에 음악을 주고받을 수 있습니다.'); return; }
+    }
+    let n = 0;
+    if (w.up.length) {
+      const folderId = await ensureFolder(gcal, musicMeta().folderId, '학업 플래너 음악');
+      if (folderId !== musicMeta().folderId) saveMusic({ folderId });
+      for (const t of w.up) {
+        const blob = await cacheGet(t.id);
+        if (!blob) continue;
+        ui.musicProgress = `드라이브에 올리는 중: ${t.name}`;
+        scheduleRender();
+        const driveId = await uploadFile(gcal, folderId, blob, t.name, t.type);
+        saveMusic({ tracks: libTracks().map(x => (x.id === t.id ? { ...x, driveId } : x)) });
+        n++;
+      }
+    }
+    for (const id of w.down) {
+      const t = trackById(id);
+      if (!t?.driveId) continue;
+      ui.musicProgress = `이 기기로 받는 중: ${t.name}`;
+      scheduleRender();
+      const blob = await downloadFile(gcal, t.driveId);
+      await cachePut(id, blob);
+      cachedIds.add(id);
+      n++;
+    }
+    if (w.del.length) {
+      for (const d of w.del) await deleteFile(gcal, d);
+      saveMusic({ pendingDeletes: (musicMeta().pendingDeletes || []).filter(x => !w.del.includes(x)) });
+    }
+    if (interactive) toast(n ? `음악 ${n}곡을 주고받았습니다.` : '드라이브와 맞췄습니다.');
+  } catch (e) {
+    console.warn('드라이브 동기화 실패', e);
+    if (e.status === 401) toast('구글 연결이 만료됐습니다. 음악 카드의 드라이브 버튼을 다시 눌러 주세요.');
+    else if (e.status === 403) toast('드라이브 권한이 없거나 Google Cloud에서 Drive API가 꺼져 있습니다.');
+    else if (e.code === 'popup' || e.code === 'gis') toast(`${e.message} 다시 눌러 주세요.`);
+    else if (e.code === 'access_denied' || e.code === 'scope') toast('드라이브 권한을 허용해야 음악을 주고받을 수 있습니다.');
+    else toast(`드라이브 오류: ${e.message}`);
+  } finally {
+    driveBusy = false;
+    ui.musicProgress = '';
+    refreshPlayers();
+    scheduleRender();
+  }
+}
+function scheduleDriveAuto() {
+  clearTimeout(driveAutoTimer);
+  driveAutoTimer = setTimeout(() => {
+    if (!gcal.hasScope(DRIVE_SCOPE) || !navigator.onLine) return;
+    const w = driveWork();
+    if (w.up.length || w.down.length || w.del.length) driveSync();
+  }, 3000);
 }
 
 /* 미션 창(Document Picture-in-Picture, 크롬 계열 전용) — 오늘 과제 목록 + 작은 타이머 */
@@ -1390,42 +1587,81 @@ function offerCard() {
   </article>`;
 }
 
+function trackStatus(t) {
+  if (cachedIds.has(t.id)) return !t.driveId && t.origin === deviceId && gcal.available ? { cls: 'up', txt: '드라이브에 올리기 전' } : null;
+  return t.driveId ? { cls: 'cloud', txt: '드라이브에만 있음' } : { cls: 'away', txt: '다른 기기에서 아직 안 올림' };
+}
+
 function musicCard() {
-  const kind = ui.musicTab === 'study' ? 'study' : 'alarm', M = kind === 'study' ? study : music, L = M.list, open = ui.musicOpen;
-  const pre = kind === 'study' ? 'study' : 'music', locked = kind === 'study' && !studyActive();
-  const tracks = L.map((t, i) => `<li class="track ${i === M.cur ? 'active' : ''}" data-sort-id="${t.id}">
-      <button class="drag-handle" type="button" aria-label="끌어서 순서 바꾸기">${GRIP}</button><span class="tn">${i + 1}</span><span class="tname" title="${esc(t.name)}">${esc(t.name)}</span>
+  const open = ui.musicOpen, m = musicMeta(), pls = libPlaylists(), pl = openPl();
+  const head = `<button class="music-head" data-action="music-open" aria-expanded="${open}"><span aria-hidden="true">🎵</span><b>음악</b><span class="muted small">${pls.length ? `플리 ${pls.length}개` : '플리 없음'}${study.playing ? ' · 공부 플리 재생 중' : preview.playing ? ' · 듣는 중' : ''}</span><i class="chev">${open ? '−' : '+'}</i></button>`;
+  if (!open) return `<article class="card music">${head}</article>`;
+  const opt = (sel, none) => `<option value="">${none}</option>${pls.map(p => `<option value="${p.id}" ${sel === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}`;
+  const roles = `<div class="pl-roles">
+      <label class="field inline"><span>공부할 때</span><select data-change="pl-role" data-role="studyPl" data-key="pl-role|studyPl" aria-label="공부할 때 틀 플리">${opt(m.studyPl, '안 틀기')}</select></label>
+      <label class="field inline"><span>타이머 알람</span><select data-change="pl-role" data-role="alarmPl" data-key="pl-role|alarmPl" aria-label="타이머 알람으로 쓸 플리">${opt(m.alarmPl, '기본 알림음')}</select></label>
+    </div>`;
+  const w = driveWork(), pending = w.up.length || w.down.length || w.del.length;
+  const driveLine = !gcal.available
+    ? `<p class="muted small">구글 연결 설정 전이라 음악 파일은 이 기기에만 저장됩니다.</p>`
+    : `<div class="drive-line"><span class="muted small">☁ ${driveBusy ? esc(ui.musicProgress || '드라이브와 주고받는 중…')
+        : pending ? [w.up.length && `올릴 곡 ${w.up.length}`, w.down.length && `받을 곡 ${w.down.length}`, w.del.length && `정리할 파일 ${w.del.length}`].filter(Boolean).join(' · ')
+        : '모든 기기와 맞춰져 있음'}</span>${pending && !driveBusy ? `<button type="button" class="btn sm" data-action="drive-sync">${gcal.hasScope(DRIVE_SCOPE) ? '지금 주고받기' : '드라이브 연결'}</button>` : ''}</div>`;
+  const chips = `<div class="pl-chips">${pls.map(p => `<button type="button" class="pl-chip ${pl && p.id === pl.id ? 'on' : ''}" data-action="pl-open" data-pl="${p.id}">${esc(p.name)}${p.id === m.studyPl ? '<small>공부</small>' : ''}${p.id === m.alarmPl ? '<small>알람</small>' : ''}</button>`).join('')}</div>
+    <div class="add-row tight"><input id="pl-new-name" data-enter="pl-new" placeholder="새 플리 이름" maxlength="40" autocomplete="off" aria-label="새 플리 이름"><button type="button" class="btn sm" data-action="pl-new">플리 만들기</button></div>`;
+  if (!pl) {
+    return `<article class="card music">${head}<div class="music-body">${roles}${driveLine}${chips}
+      <p class="muted small">플리를 만들고 곡을 추가하세요. 만든 플리는 '공부할 때'나 '타이머 알람'으로 골라 쓸 수 있고, 모든 기기에서 같은 플리를 씁니다.</p></div></article>`;
+  }
+  const P = uiPlayer(), isStudy = pl.id === m.studyPl, locked = isStudy && !studyActive();
+  const items = (pl.items || []).map(id => trackById(id)).filter(Boolean);
+  const missing = items.filter(t => !cachedIds.has(t.id) && t.driveId).length;
+  const rows = items.map((t, i) => {
+    const st = trackStatus(t), pi = P.list.findIndex(x => x.id === t.id);
+    return `<li class="track ${P.list[P.cur]?.id === t.id ? 'active' : ''} ${cachedIds.has(t.id) ? '' : 'absent'}" data-sort-id="${t.id}">
+      <button class="drag-handle" type="button" aria-label="끌어서 순서 바꾸기">${GRIP}</button><span class="tn">${i + 1}</span>
+      <span class="tname" title="${esc(t.name)}">${esc(t.name)}${st ? `<small class="tstat ${st.cls}">${st.txt}</small>` : ''}</span>
       <span class="tbtns">
-        <button class="icon-btn sm" data-action="music-move" data-m="${kind}" data-i="${i}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="위로">↑</button>
-        <button class="icon-btn sm" data-action="music-move" data-m="${kind}" data-i="${i}" data-dir="1" ${i === L.length - 1 ? 'disabled' : ''} aria-label="아래로">↓</button>
-        <button class="icon-btn sm" data-action="music-play" data-m="${kind}" data-i="${i}" ${locked ? 'disabled' : ''} aria-label="재생">▶</button>
-        <button class="icon-btn sm" data-action="music-del" data-m="${kind}" data-i="${i}" aria-label="삭제">×</button>
-      </span></li>`).join('');
-  const hint = kind === 'study'
-    ? '어느 타이머든 돌고 있을 때만 재생되고, 멈추면 같이 멈춥니다. 공부할 때만 듣는 음악으로 정해 두면 시작 신호가 됩니다.'
-    : '타이머가 끝나면 첫 곡부터 재생됩니다. 비워 두면 기본 알림음이 울립니다.';
-  return `<article class="card music">
-    <button class="music-head" data-action="music-open" aria-expanded="${open}"><span aria-hidden="true">🎵</span><b>음악</b><span class="muted small">알람 ${music.list.length ? `${music.list.length}곡` : '기본음'} · 공부 ${study.list.length}곡${study.playing ? ' · 재생 중' : ''}</span><i class="chev">${open ? '−' : '+'}</i></button>
-    ${open ? `<div class="music-body">
-      <div class="seg" role="tablist"><button type="button" class="${kind === 'alarm' ? 'on' : ''}" data-action="music-tab" data-t="alarm" role="tab" aria-selected="${kind === 'alarm'}">알람 음악</button><button type="button" class="${kind === 'study' ? 'on' : ''}" data-action="music-tab" data-t="study" role="tab" aria-selected="${kind === 'study'}">공부 플레이리스트</button></div>
-      <p class="muted small">${hint} 올린 음악은 이 기기에만 저장됩니다.</p>
-      <div class="btn-row tight wrap">
-        <label class="btn file-btn">+ 파일 추가<input type="file" id="${pre}-file" accept="audio/*" multiple hidden></label>
-        <button class="btn" data-action="music-repeat" data-m="${kind}">${M.repeat ? '반복 켜짐' : '반복 꺼짐'}</button>
+        <button class="icon-btn sm" data-action="mp-play" data-i="${pi}" ${pi < 0 || locked ? 'disabled' : ''} aria-label="재생">▶</button>
+        <button class="icon-btn sm" data-action="pl-remove" data-pl="${pl.id}" data-t="${t.id}" aria-label="플리에서 빼기">×</button>
+      </span></li>`;
+  }).join('');
+  const inPl = new Set(pl.items || []), others = libTracks().filter(t => !inPl.has(t.id));
+  const pick = ui.libPick ? `<div class="lib-pick"><b>전체 곡에서 추가</b>${others.length
+    ? `<ul>${others.map(t => `<li><span>${esc(t.name)}</span><button type="button" class="btn sm" data-action="pl-add-track" data-pl="${pl.id}" data-t="${t.id}">추가</button></li>`).join('')}</ul>`
+    : '<p class="muted small">더 추가할 곡이 없습니다.</p>'}</div>` : '';
+  const all = libTracks();
+  return `<article class="card music">${head}<div class="music-body">
+    ${roles}${driveLine}${chips}
+    <div class="pl-panel">
+      <div class="pl-head">
+        <input data-change="pl-name" data-pl="${pl.id}" data-key="pl-name|${pl.id}" value="${esc(pl.name)}" maxlength="40" aria-label="플리 이름">
+        <button type="button" class="btn sm" data-action="pl-repeat" data-pl="${pl.id}">${pl.repeat !== false ? '반복 켜짐' : '반복 꺼짐'}</button>
+        <button type="button" class="btn sm danger" data-action="pl-del" data-pl="${pl.id}">플리 삭제</button>
       </div>
-      ${L.length ? `<ul class="track-list" data-sortable="music" data-m="${kind}">${tracks}</ul>
-      <div class="player">
+      ${isStudy ? '<p class="muted small">공부할 때 쓰는 플리라 타이머가 돌 때만 재생되고, 멈추면 같이 멈춥니다.</p>' : ''}
+      <div class="btn-row tight wrap">
+        <label class="btn sm file-btn">+ 파일 추가<input type="file" id="pl-file" data-pl="${pl.id}" accept="audio/*" multiple hidden></label>
+        <button type="button" class="btn sm ${ui.libPick ? 'primary' : ''}" data-action="lib-pick">+ 전체 곡에서</button>
+        ${missing ? `<button type="button" class="btn sm" data-action="pl-keep" data-pl="${pl.id}">이 기기에 받기 (${missing}곡)</button>` : ''}
+      </div>
+      ${pick}
+      ${items.length ? `<ul class="track-list" data-sortable="pl" data-pl="${pl.id}">${rows}</ul>` : '<p class="muted small">아직 곡이 없습니다.</p>'}
+      ${P.list.length ? `<div class="player">
         <div class="player-btns">
-          <button class="round-btn sm" data-action="music-prev" data-m="${kind}" ${locked ? 'disabled' : ''} aria-label="이전 곡">⏮</button>
-          <button class="round-btn main sm" data-action="music-toggle" data-m="${kind}" ${locked ? 'disabled' : ''} aria-label="재생/일시정지">${M.playing ? ICON_PAUSE : ICON_PLAY}</button>
-          <button class="round-btn sm" data-action="music-next" data-m="${kind}" ${locked ? 'disabled' : ''} aria-label="다음 곡">⏭</button>
+          <button class="round-btn sm" data-action="mp-prev" ${locked ? 'disabled' : ''} aria-label="이전 곡">⏮</button>
+          <button class="round-btn main sm" data-action="mp-toggle" ${locked ? 'disabled' : ''} aria-label="재생/일시정지">${P.playing ? ICON_PAUSE : ICON_PLAY}</button>
+          <button class="round-btn sm" data-action="mp-next" ${locked ? 'disabled' : ''} aria-label="다음 곡">⏭</button>
         </div>
-        <div class="now">${locked ? '타이머가 돌 때 재생됩니다' : M.cur >= 0 && L[M.cur] ? esc(L[M.cur].name) : '트랙 없음'}</div>
-        <input type="range" id="${pre}-seek" min="0" max="1000" value="0" aria-label="재생 위치">
-        <div class="time-row"><span id="${pre}-cur">0:00</span><span id="${pre}-dur">0:00</span></div>
-      </div>` : `<p class="muted small">파일을 추가하면 여기에 표시됩니다.</p>`}
-    </div>` : ''}
-  </article>`;
+        <div class="now">${locked ? '타이머가 돌 때 재생됩니다' : P.cur >= 0 && P.list[P.cur] ? esc(P.list[P.cur].name) : '트랙 없음'}</div>
+        <input type="range" id="mp-seek" min="0" max="1000" value="0" aria-label="재생 위치">
+        <div class="time-row"><span id="mp-cur">0:00</span><span id="mp-dur">0:00</span></div>
+      </div>` : ''}
+    </div>
+    <button type="button" class="link-btn" data-action="lib-all">${ui.libAll ? '전체 곡 접기' : `전체 곡 ${all.length}개 관리`}</button>
+    ${ui.libAll ? `<div class="lib-all">${all.length ? `<ul>${all.map(t => `<li><span>${esc(t.name)}<small class="muted"> · ${fmtSize(t.size)}${cachedIds.has(t.id) ? '' : ' · 이 기기에 없음'}</small></span><button type="button" class="btn sm danger" data-action="track-del" data-t="${t.id}">완전히 삭제</button></li>`).join('')}</ul>` : ''}
+      <p class="muted small">플리에서 빼도 곡은 여기 남습니다. '완전히 삭제'하면 모든 플리와 드라이브, 각 기기에서 지워집니다. 올린 음악은 이 계정의 기기들에서만 쓰입니다.</p></div>` : ''}
+  </div></article>`;
 }
 
 function viewTimer() {
@@ -1524,7 +1760,7 @@ function calendarCard() {
   const status = calBusy ? '반영 중…' : n ? `반영 대기 ${n}건` : '최신 상태';
   return `<article class="card">${head(status)}
     <p class="muted small">'학업 플래너' 캘린더에 알림 일정을 넣고 있습니다.${m.syncedAt ? ` 마지막 반영: ${fmtMD(ymd(new Date(m.syncedAt)))} ${hmOf(m.syncedAt)}` : ''}</p>
-    <p class="muted small">구글 연결 권한은 1시간 정도면 만료됩니다. 만료된 뒤 바뀐 내용이 있으면 상단에 📅 표시가 뜨고, 누르면 반영됩니다.${gcal.hasToken ? ' 지금은 연결이 살아 있어 바뀐 내용이 자동으로 반영됩니다.' : ''}</p>
+    <p class="muted small">구글 연결 권한은 1시간 정도면 만료됩니다. 만료된 뒤 바뀐 내용이 있으면 상단에 📅 표시가 뜨고, 누르면 반영됩니다.${gcal.hasScope(CAL_SCOPE) ? ' 지금은 연결이 살아 있어 바뀐 내용이 자동으로 반영됩니다.' : ''}</p>
     <div class="btn-row wrap"><button class="btn" data-action="cal-sync" ${calBusy ? 'disabled' : ''}>지금 반영</button><button class="btn danger" data-action="cal-disconnect">연결 해제</button></div>
   </article>`;
 }
@@ -1969,17 +2205,44 @@ const actions = {
   'mt-norecord'() { mt.offer = null; mtSave(); scheduleRender(); },
   'mt-pip'() { togglePip(); },
   'music-open'() { ui.musicOpen = !ui.musicOpen; render(); },
-  'music-tab'(el) { ui.musicTab = el.dataset.t; render(); },
-  'music-repeat'(el) { mOf(el).toggleRepeat(); },
-  'music-move'(el) { mOf(el).move(Number(el.dataset.i), Number(el.dataset.dir)); },
-  'music-play'(el) { if (studyLocked(el)) return; mOf(el).play(Number(el.dataset.i)); },
-  'music-del'(el) {
-    const M = mOf(el), i = Number(el.dataset.i), t = M.list[i];
-    if (t && confirm(`'${t.name}'을(를) 목록에서 지울까요?`)) M.remove(i);
+  'pl-open'(el) { ui.plOpen = el.dataset.pl; ui.libPick = false; if (preview.playing) preview.pause(); refreshPlayers(); render(); },
+  'pl-new'() {
+    const inp = document.getElementById('pl-new-name'), name = inp?.value.trim();
+    if (!name) { inp?.focus(); return; }
+    inp.value = '';
+    const id = uid();
+    saveMusic({ playlists: [...clonePls(), { id, name, items: [], repeat: true }] });
+    ui.plOpen = id;
+    refreshPlayers();
   },
-  'music-toggle'(el) { if (studyLocked(el)) return; mOf(el).toggle(); },
-  'music-prev'(el) { if (studyLocked(el)) return; mOf(el).prev(); },
-  'music-next'(el) { if (studyLocked(el)) return; mOf(el).next(); },
+  'pl-del'(el) {
+    const p = plById(el.dataset.pl), m = musicMeta();
+    if (!p || !confirm(`'${p.name}' 플리를 지울까요? 곡은 '전체 곡'에 남습니다.`)) return;
+    saveMusic({ playlists: clonePls().filter(x => x.id !== p.id), ...(m.studyPl === p.id ? { studyPl: null } : {}), ...(m.alarmPl === p.id ? { alarmPl: null } : {}) });
+    ui.plOpen = null;
+    refreshPlayers();
+  },
+  'pl-repeat'(el) { saveMusic({ playlists: clonePls().map(p => (p.id === el.dataset.pl ? { ...p, repeat: p.repeat === false } : p)) }); refreshPlayers(); },
+  'pl-remove'(el) { saveMusic({ playlists: clonePls().map(p => (p.id === el.dataset.pl ? { ...p, items: p.items.filter(x => x !== el.dataset.t) } : p)) }); refreshPlayers(); },
+  'pl-add-track'(el) { saveMusic({ playlists: clonePls().map(p => (p.id === el.dataset.pl ? { ...p, items: [...p.items, el.dataset.t] } : p)) }); refreshPlayers(); scheduleDriveAuto(); },
+  'pl-keep'(el) {
+    const k = new Set(keepPls());
+    k.add(el.dataset.pl);
+    try { localStorage.setItem(KEEP_KEY, JSON.stringify([...k])); } catch { /* 무시 */ }
+    driveSync({ interactive: true });
+  },
+  'lib-pick'() { ui.libPick = !ui.libPick; render(); },
+  'lib-all'() { ui.libAll = !ui.libAll; render(); },
+  'track-del'(el) {
+    const t = trackById(el.dataset.t);
+    if (!t || !confirm(`'${t.name}'을(를) 모든 플리와 드라이브, 각 기기에서 지울까요?`)) return;
+    deleteTrack(t.id);
+  },
+  'drive-sync'() { driveSync({ interactive: true }); },
+  'mp-play'(el) { if (mpLocked()) return; uiPlayer().play(Number(el.dataset.i)); },
+  'mp-toggle'() { if (mpLocked()) return; uiPlayer().toggle(); },
+  'mp-prev'() { if (mpLocked()) return; uiPlayer().prev(); },
+  'mp-next'() { if (mpLocked()) return; uiPlayer().next(); },
   'theme-preset'(el) {
     const p = PRESETS.find(x => x.id === el.dataset.id);
     if (!p) return;
@@ -1988,13 +2251,6 @@ const actions = {
   },
   'theme-auto'() { ui.themeDraft = null; saveTheme({ mode: 'auto' }); },
 };
-
-const mOf = el => (el.dataset.m === 'study' ? study : music);
-function studyLocked(el) {
-  if (el.dataset.m !== 'study' || studyActive()) return false;
-  toast('공부 플레이리스트는 타이머가 돌 때만 재생됩니다.');
-  return true;
-}
 
 const changeActions = {
   tfield(el) {
@@ -2013,6 +2269,12 @@ const changeActions = {
     if (f === 'start' && v) askNotify();
   },
   'step-toggle'(el) { updateSteps(el.dataset.date, el.dataset.id, s => s.map(x => (x.id === el.dataset.sid ? { ...x, done: el.checked } : x))); },
+  'pl-role'(el) { saveMusic({ [el.dataset.role]: el.value || null }); refreshPlayers(); scheduleDriveAuto(); },
+  'pl-name'(el) {
+    const v = el.value.trim();
+    if (!v) { render(); return; }
+    saveMusic({ playlists: clonePls().map(p => (p.id === el.dataset.pl ? { ...p, name: v } : p)) });
+  },
   'tl-sel'(el) { const n = document.getElementById('tl-new'); if (n) { n.hidden = el.value !== '__new'; if (!n.hidden) n.focus(); } },
   'cl-check'(el) { if (ui.checklist) ui.checklist.checked[el.dataset.i] = el.checked; },
   tdone(el) { updateTask(el.dataset.date, el.dataset.id, { done: el.checked }); },
@@ -2036,8 +2298,9 @@ function sortCommit(list, ids) {
   if (list.dataset.sortable === 'tasks') {
     const date = list.dataset.date, cur = getTasks(date);
     setTasks(date, ids.map(id => cur.find(t => t.id === id)).filter(Boolean));
-  } else if (list.dataset.sortable === 'music') {
-    (list.dataset.m === 'study' ? study : music).reorder(ids);
+  } else if (list.dataset.sortable === 'pl') {
+    saveMusic({ playlists: clonePls().map(p => (p.id === list.dataset.pl ? { ...p, items: ids } : p)) });
+    refreshPlayers();
   }
 }
 
@@ -2131,7 +2394,7 @@ $app.addEventListener('click', e => {
 
 $app.addEventListener('change', e => {
   const el = e.target;
-  if (el.id === 'music-file' || el.id === 'study-file') { if (el.files?.length) (el.id === 'study-file' ? study : music).add([...el.files]); el.value = ''; return; }
+  if (el.id === 'pl-file') { if (el.files?.length) addFilesToPl(el.dataset.pl, [...el.files]); el.value = ''; return; }
   if (el.dataset.routine) {
     const R = routineCopy(), f = el.dataset.routine, v = el.value.trim();
     if (f === 'dayStart' || f === 'dayEnd') {
@@ -2189,8 +2452,7 @@ $app.addEventListener('input', e => {
   const el = e.target;
   if ('mtInput' in el.dataset) { mtFromInputs(); return; }
   if (el.dataset.color) { themeInput(el); return; }
-  if (el.id === 'music-seek') music.seek(Number(el.value) / 1000);
-  if (el.id === 'study-seek') study.seek(Number(el.value) / 1000);
+  if (el.id === 'mp-seek') uiPlayer().seek(Number(el.value) / 1000);
 });
 
 $app.addEventListener('keydown', e => {
@@ -2218,11 +2480,12 @@ store.subscribe(reason => {
   if (reason === 'status' && store.status.phase === 'ready') { updateBadge(); return; }
   scheduleRender();
   pipRefresh();
-  if (store.status.phase === 'ready') scheduleCalAuto();
+  if (store.status.phase === 'ready') { scheduleCalAuto(); scheduleDriveAuto(); migrateLegacyMusic(); refreshPlayers(); }
 });
 addEventListener('online', () => {
   if (gcal.available) gcal.loadGis().catch(() => {});
   scheduleCalAuto();
+  scheduleDriveAuto();
 });
 
 // 자정이 지나면 '오늘'을 따라감
@@ -2250,8 +2513,7 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
 }
 
 if (mtRunning() && mt.endTime <= Date.now()) mtFinish(true); // 앱이 꺼진 사이 끝난 타이머
-music.load();
-study.load();
+cacheIds().then(ids => { cachedIds = ids; refreshPlayers(); }).catch(() => {});
 if (gcal.available && navigator.onLine) gcal.loadGis().catch(() => {}); // 버튼을 누르는 순간 바로 연결 창을 열 수 있게 미리 불러 둠
 render();
 store.init();

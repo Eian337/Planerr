@@ -1,8 +1,11 @@
 // 구글 캘린더 연동 — 플래너가 직접 만든 '학업 플래너' 캘린더에만 알림 일정을 맞춰 넣습니다.
 // 권한(calendar.app.created)은 이 앱이 만든 캘린더와 그 일정만 다룰 수 있어서, 원래 쓰던 다른 캘린더에는 손대지 않습니다.
+// 같은 구글 연결로 드라이브(음악 파일, drive.file — 이 앱이 만든 파일만)도 함께 다룹니다.
 // 브라우저에서 받는 권한은 1시간 정도면 만료되고, 다시 받을 때는 버튼 같은 사용자 동작이 필요합니다.
 
-const SCOPE = 'https://www.googleapis.com/auth/calendar.app.created';
+export const CAL_SCOPE = 'https://www.googleapis.com/auth/calendar.app.created';
+export const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const SCOPES = [CAL_SCOPE, DRIVE_SCOPE];
 const API = 'https://www.googleapis.com/calendar/v3';
 const GIS_SRC = 'https://accounts.google.com/gsi/client';
 const TOKEN_KEY = 'planner.gcal.token.v1';
@@ -34,6 +37,8 @@ export class GCal {
 
   get available() { return !!this.clientId; }
   get hasToken() { return !!(this.token && this.token.exp > Date.now() + 60000); }
+  // 예전(캘린더만 쓰던) 토큰은 scopes가 없으므로 캘린더 권한만 있는 것으로 봄
+  hasScope(s) { return this.hasToken && (this.token.scopes ? this.token.scopes.split(' ').includes(s) : s === CAL_SCOPE); }
 
   clearToken() {
     this.token = null;
@@ -62,12 +67,14 @@ export class GCal {
       const timer = setTimeout(() => reject(err('구글 연결 창이 응답하지 않습니다.', { code: 'popup' })), 120000);
       const client = oauth2.initTokenClient({
         client_id: this.clientId,
-        scope: SCOPE,
+        scope: SCOPES.join(' '),
         callback: r => {
           clearTimeout(timer);
           if (r.error) return reject(err(r.error_description || r.error, { code: r.error }));
-          if (oauth2.hasGrantedAllScopes && !oauth2.hasGrantedAllScopes(r, SCOPE)) return reject(err('캘린더 권한을 허용하지 않았습니다.', { code: 'scope' }));
-          this.token = { v: r.access_token, exp: Date.now() + (Number(r.expires_in) || 3600) * 1000 };
+          // 사용자가 일부 권한만 허용할 수 있으므로 허용된 권한 목록을 함께 저장
+          const granted = SCOPES.filter(s => (oauth2.hasGrantedAnyScope ? oauth2.hasGrantedAnyScope(r, s) : String(r.scope || '').includes(s)));
+          if (!granted.length) return reject(err('권한을 허용하지 않았습니다.', { code: 'scope' }));
+          this.token = { v: r.access_token, exp: Date.now() + (Number(r.expires_in) || 3600) * 1000, scopes: granted.join(' ') };
           try { localStorage.setItem(TOKEN_KEY, JSON.stringify(this.token)); localStorage.setItem(EVER_KEY, '1'); } catch { /* 무시 */ }
           resolve(this.token);
         },
@@ -86,22 +93,26 @@ export class GCal {
     try { localStorage.removeItem(EVER_KEY); } catch { /* 무시 */ }
   }
 
-  async api(method, path, body) {
-    if (!this.hasToken) throw err('캘린더 연결이 만료됐습니다.', { status: 401 });
-    const res = await fetch(API + path, {
-      method,
-      headers: { Authorization: `Bearer ${this.token.v}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    if (res.status === 204) return null;
-    let data = null;
-    try { data = await res.json(); } catch { /* 본문 없음 */ }
+  // 인증을 붙여 요청하고, 실패하면 status가 담긴 오류를 던짐(응답 본문은 호출한 쪽이 읽음)
+  async raw(url, opts = {}) {
+    if (!this.hasToken) throw err('구글 연결이 만료됐습니다.', { status: 401 });
+    const res = await fetch(url, { ...opts, headers: { Authorization: `Bearer ${this.token.v}`, ...(opts.headers || {}) } });
     if (!res.ok) {
       if (res.status === 401) this.clearToken();
+      let data = null;
+      try { data = await res.json(); } catch { /* 본문 없음 */ }
       throw err(data?.error?.message || `HTTP ${res.status}`, { status: res.status });
     }
-    return data;
+    return res;
   }
+
+  async json(method, url, body) {
+    const res = await this.raw(url, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+    if (res.status === 204) return null;
+    try { return await res.json(); } catch { return null; }
+  }
+
+  api(method, path, body) { return this.json(method, API + path, body); }
 
   async createCalendar(summary, timeZone) {
     const r = await this.api('POST', '/calendars', { summary, timeZone, description: '학업 플래너가 알림 일정을 넣는 캘린더입니다. 일정은 플래너에서 고치면 자동으로 바뀝니다.' });
