@@ -9,7 +9,7 @@ import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timeta
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -58,6 +58,7 @@ const ui = {
   tlOpen: null,
   checklist: null,
   themeDraft: null,
+  timerTab: (() => { try { return localStorage.getItem('planner.timertab.v1') === 'alarm' ? 'alarm' : 'study'; } catch { return 'study'; } })(),
 };
 
 /* ───────── 데이터 조회 ───────── */
@@ -159,6 +160,8 @@ function tick() {
   checkAlarms();
   if (mtRunning() && mtRemain() <= 0) mtFinish();
   else updateMainTimerDom();
+  if (atRunning() && atRemain() <= 0) atFinish();
+  else updateAlarmTimerDom();
   if (study.playing && !studyActive()) study.pause();
   if (timer && timer.phase === 'warm' && elapsed() >= timer.warmMs) {
     timer.accMs = timer.warmMs; timer.segStart = null; timer.phase = 'prompt';
@@ -195,7 +198,7 @@ function updateTimerDom() {
 const fmtT = s => `${Math.floor(s / 60)}:${pad(Math.floor(s % 60))}`;
 /* ───────── 음악: 플레이리스트(여러 개) ─────────
    플리·곡 정보는 Firebase로 기기 간 동기화되고, 음악 파일은 구글 드라이브를 거쳐 기기마다 받아 저장(오프라인 재생 가능)
-   재생기: 공부용(study), 타이머 알람용(music), 플리 미리 듣기용(preview) */
+   재생기: 공부용(study), 공부 타이머 종료음(music), 알람 타이머 종료음(alarm2), 플리 미리 듣기용(preview) */
 function musicTime(p, cur, dur) {
   if (p !== uiPlayer()) return;
   const ok = Number.isFinite(dur) && dur > 0;
@@ -209,12 +212,13 @@ function musicTime(p, cur, dur) {
 const music = new Player({ onChange: () => scheduleRender(), onTime: (c, d) => musicTime(music, c, d) });
 const study = new Player({ onChange: () => scheduleRender(), onTime: (c, d) => musicTime(study, c, d) });
 const preview = new Player({ onChange: () => scheduleRender(), onTime: (c, d) => musicTime(preview, c, d) });
+const alarm2 = new Player({ onChange: () => scheduleRender(), onTime: (c, d) => musicTime(alarm2, c, d) });
 
 // 공부 플리: 어느 타이머든 돌고 있을 때만 재생, 멈추면 같이 멈춤
 const studyActive = () => mtRunning() || !!(timer && (timer.phase === 'warm' || timer.phase === 'flow'));
 function syncStudy() {
   if (studyActive() && preview.playing) preview.pause();
-  if (studyActive() && !music.alarmPlaying) { if (!study.playing && study.list.length) study.resume(); }
+  if (studyActive() && !music.alarmPlaying && !alarm2.alarmPlaying && !atm.alarm) { if (!study.playing && study.list.length) study.resume(); }
   else if (study.playing) study.pause();
 }
 
@@ -362,7 +366,7 @@ function mtFinish(silent = false) {
     study.pause();
     music.playAlarm().then(ok => { if (!ok) playMelody(); });
     const task = topTask(todayStr())?.text;
-    notify('⏰ 타이머 종료', task ? `${task} — 설정한 시간이 됐어요.` : '설정한 시간이 됐어요.');
+    notify('⏰ 공부 타이머 종료', task ? `${task} — 설정한 시간이 됐어요.` : '설정한 시간이 됐어요.');
     try { navigator.vibrate?.([300, 150, 300]); } catch { /* 무시 */ }
   }
   mtSave(); scheduleRender(); pipRefresh();
@@ -398,8 +402,132 @@ function updateMainTimerDom() {
 }
 
 function updateTitle(startText) {
-  const t = startText ? `${startText} · ${BASE_TITLE}` : mtRunning() ? `${fmtClock(mtRemain())} · 타이머` : BASE_TITLE;
+  const t = startText ? `${startText} · ${BASE_TITLE}` : mtRunning() ? `${fmtClock(mtRemain())} · 타이머` : atRunning() ? `⏰ ${fmtClock(atRemain())} · 알람` : BASE_TITLE;
   if (document.title !== t) document.title = t;
+}
+
+/* ───────── 알람 타이머 ─────────
+   공부와 상관없는 시간 재기(쉬는 시간, 빨래 등). 공부 타이머와 따로, 동시에 돌릴 수 있음
+   체크리스트·공부 플리·집중 시간 기록 없이, 끝나면 '알람 타이머 종료음' 플리(없으면 기본 알림음)가 울림 */
+const AKEY = 'planner.atimer.v1';
+const AT_DEFAULT = 10 * 60000;
+const atFresh = () => ({ totalMs: AT_DEFAULT, remainMs: AT_DEFAULT, setMs: AT_DEFAULT, endTime: null, status: 'ready', alarm: false, calEventId: null });
+let atm = (() => { try { return { ...atFresh(), ...(JSON.parse(localStorage.getItem(AKEY)) || {}) }; } catch { return atFresh(); } })();
+const atSave = () => { try { localStorage.setItem(AKEY, JSON.stringify(atm)); } catch { /* 무시 */ } };
+const atRunning = () => atm.status === 'running';
+const atRemain = () => (atRunning() ? Math.max(0, atm.endTime - Date.now()) : Math.max(0, atm.remainMs));
+const fmtDurMs = ms => {
+  const s = Math.round(ms / 1000), m = Math.floor(s / 60), r = s % 60;
+  return m ? `${fmtDur(m)}${r ? ` ${r}초` : ''}` : `${r}초`;
+};
+
+function atStopSound() { alarm2.stopAlarm(); stopMelody(); }
+
+function atToggle() {
+  if (atRunning()) {
+    atm.remainMs = atRemain(); atm.endTime = null; atm.status = 'paused';
+    calTimerRemove(atm);
+  } else {
+    if (atm.remainMs <= 0) {
+      if (atm.setMs <= 0) { toast('시간을 먼저 정해 주세요.'); return; }
+      atm.totalMs = atm.setMs; atm.remainMs = atm.setMs;
+    }
+    ensureAudio(); alarm2.unlock(); askNotify();
+    atStopSound(); atm.alarm = false;
+    atm.endTime = Date.now() + atm.remainMs; atm.status = 'running';
+  }
+  atSave(); scheduleRender(); pipRefresh();
+  if (atRunning()) calTimerUpsert(atm);
+}
+
+function atReset() {
+  atStopSound();
+  calTimerRemove(atm);
+  const t = atm.setMs > 0 ? atm.setMs : AT_DEFAULT;
+  Object.assign(atm, { status: 'ready', endTime: null, alarm: false, totalMs: t, remainMs: t });
+  atSave(); scheduleRender(); pipRefresh();
+  syncStudy();
+}
+
+function atAdd(sec) {
+  const add = sec * 1000;
+  if (atm.status === 'done') {
+    atStopSound();
+    Object.assign(atm, { status: 'ready', alarm: false, totalMs: add, remainMs: add });
+    syncStudy();
+  } else if (atRunning()) {
+    const a = Math.min(add, Math.max(0, MT_CAP - atRemain()));
+    atm.endTime += a; atm.totalMs += a;
+    calTimerUpsert(atm);
+  } else {
+    atm.remainMs = Math.min(MT_CAP, atm.remainMs + add);
+    atm.totalMs = Math.min(MT_CAP, atm.totalMs + add);
+  }
+  atSave(); scheduleRender(); pipRefresh();
+}
+
+function atPreset(min) {
+  if (atRunning()) { atAdd(min * 60); return; }
+  const ms = Math.min(Math.floor(atm.remainMs / 1000) * 1000 + min * 60000, MT_CAP);
+  atStopSound();
+  Object.assign(atm, { status: 'ready', alarm: false, totalMs: ms, remainMs: ms, setMs: ms });
+  atSave(); scheduleRender(); pipRefresh();
+}
+
+function atFromInputs() {
+  if (atRunning()) return;
+  const v = (id, max) => Math.min(max, Math.max(0, parseInt(document.getElementById(id)?.value, 10) || 0));
+  const ms = (v('at-h', 23) * 3600 + v('at-m', 59) * 60 + v('at-s', 59)) * 1000;
+  const hadAlarm = atm.alarm;
+  if (hadAlarm) atStopSound();
+  Object.assign(atm, { status: 'ready', alarm: false, totalMs: ms, remainMs: ms, setMs: ms });
+  atSave(); updateAlarmTimerDom();
+  if (hadAlarm) { scheduleRender(); pipRefresh(); syncStudy(); }
+}
+
+// silent: 앱이 꺼져 있는 동안 끝난 경우(소리 없이 끝난 것으로만 표시)
+function atFinish(silent = false) {
+  Object.assign(atm, { status: 'done', remainMs: 0, endTime: null, alarm: !silent });
+  if (silent) {
+    calTimerRemove(atm);
+  } else {
+    // 알람이 잘 들리도록 공부 플리·미리 듣기는 잠시 멈추고, 확인을 누르면 공부 플리를 다시 틂
+    study.pause();
+    if (preview.playing) preview.pause();
+    alarm2.playAlarm().then(ok => { if (!ok) playMelody(); });
+    notify('⏰ 알람 타이머 종료', `${fmtDurMs(atm.totalMs)} 알람 타이머가 끝났습니다.`, 'planner-atimer');
+    try { navigator.vibrate?.([300, 150, 300]); } catch { /* 무시 */ }
+  }
+  atSave(); scheduleRender(); pipRefresh();
+}
+
+function atDismiss() {
+  atStopSound();
+  calTimerRemove(atm);
+  atm.alarm = false;
+  atSave(); scheduleRender(); pipRefresh();
+  syncStudy();
+}
+
+function updateAlarmTimerDom() {
+  const rem = atRemain(), txt = fmtClock(rem), ratio = atm.totalMs > 0 ? rem / atm.totalMs : 0;
+  const d = document.getElementById('at-display');
+  if (d) d.textContent = txt;
+  const r = document.getElementById('at-ring');
+  if (r) r.style.strokeDashoffset = String(MT_C * (1 - ratio));
+  const l = document.getElementById('at-label');
+  if (l) l.textContent = MT_LABEL[atm.status];
+  for (const id of ['at-mini-text', 'at-seg']) { const el = document.getElementById(id); if (el) el.textContent = txt; }
+  const ms = document.getElementById('mt-seg');
+  if (ms) ms.textContent = fmtClock(mtRemain());
+  const p = pipWin?.document.getElementById('pat');
+  if (p) p.textContent = txt;
+}
+
+const TTAB_KEY = 'planner.timertab.v1';
+function setTimerTab(t) {
+  ui.timerTab = t === 'alarm' ? 'alarm' : 'study';
+  try { localStorage.setItem(TTAB_KEY, ui.timerTab); } catch { /* 무시 */ }
 }
 
 /* ───────── 알림 (앱 안 알람 + 구글 캘린더) ───────── */
@@ -490,7 +618,7 @@ function stopMelody() {
 
 let wakeLock = null, wakeBusy = false;
 async function syncWakeLock() {
-  const want = alarmSet().wakeLock && mtRunning() && !document.hidden && 'wakeLock' in navigator;
+  const want = alarmSet().wakeLock && (mtRunning() || atRunning()) && !document.hidden && 'wakeLock' in navigator;
   if (wakeBusy || want === !!wakeLock) return;
   wakeBusy = true;
   try {
@@ -551,7 +679,7 @@ async function calSync({ interactive = false } = {}) {
     const newCal = async () => { calId = await gcal.createCalendar(BASE_TITLE, TZ); store.set('meta', 'calendar', { calendarId: calId, synced: [] }); };
     if (!calId) await newCal();
     const desired = calDesired();
-    const opts = { from: new Date(atTime(addDays(todayStr(), -1), '00:00')), deviceId, activeTimerId: mt.calEventId || null };
+    const opts = { from: new Date(atTime(addDays(todayStr(), -1), '00:00')), deviceId, activeTimerIds: [mt.calEventId, atm.calEventId].filter(Boolean) };
     let ops;
     try { ops = await syncCalendar(gcal, calId, desired, opts); }
     catch (e) {
@@ -561,6 +689,7 @@ async function calSync({ interactive = false } = {}) {
     }
     store.set('meta', 'calendar', { calendarId: calId, synced: desired.map(e => `${e.id}|${Date.parse(e.start.dateTime)}|${eventSig(e)}`), syncedAt: Date.now() });
     if (mtRunning()) calTimerUpsert();
+    if (atRunning()) calTimerUpsert(atm);
     if (interactive) toast(ops ? `캘린더에 ${ops}건 반영했습니다.` : '캘린더가 이미 최신 상태입니다.');
   } catch (e) {
     console.warn('캘린더 반영 실패', e);
@@ -579,14 +708,15 @@ function scheduleCalAuto() {
   calAutoTimer = setTimeout(() => { if (calConnected() && gcal.hasScope(CAL_SCOPE) && navigator.onLine && calPending()) calSync(); }, 2500);
 }
 
-// 타이머 종료 시각도 캘린더에(권한이 살아 있고 온라인일 때만, 기기별)
-function calTimerUpsert() {
-  if (!calConnected() || !gcal.hasScope(CAL_SCOPE) || !navigator.onLine || !mtRunning() || !mt.endTime) return;
-  const fresh = !mt.calEventId;
-  if (fresh) { mt.calEventId = hexId(`tm|${deviceId}|${Date.now()}`); mtSave(); }
-  const base = eventsPath(calMeta().calendarId), st = mt.endTime;
+// 타이머 종료 시각도 캘린더에(권한이 살아 있고 온라인일 때만, 기기별). S: 공부 타이머(mt) 또는 알람 타이머(atm)
+function calTimerUpsert(S = mt) {
+  const A = S === atm, run = A ? atRunning() : mtRunning();
+  if (!calConnected() || !gcal.hasScope(CAL_SCOPE) || !navigator.onLine || !run || !S.endTime) return;
+  const fresh = !S.calEventId;
+  if (fresh) { S.calEventId = hexId(`${A ? 'ta' : 'tm'}|${deviceId}|${Date.now()}`); (A ? atSave : mtSave)(); }
+  const base = eventsPath(calMeta().calendarId), st = S.endTime;
   const ev = {
-    id: mt.calEventId, summary: '⏰ 타이머 종료', description: `학업 플래너: ${PLANNER_URL}`,
+    id: S.calEventId, summary: A ? '⏰ 알람 타이머 종료' : '⏰ 공부 타이머 종료', description: `학업 플래너: ${PLANNER_URL}`,
     start: { dateTime: isoLocal(st), timeZone: TZ }, end: { dateTime: isoLocal(st + 5 * 60000), timeZone: TZ },
     reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 0 }] },
     extendedProperties: { private: { planner: '1', kind: 'timer', device: deviceId } },
@@ -596,11 +726,11 @@ function calTimerUpsert() {
     .catch(e => console.warn('타이머 캘린더 알림 실패', e))
     .finally(() => scheduleRender());
 }
-function calTimerRemove() {
-  const id = mt.calEventId;
+function calTimerRemove(S = mt) {
+  const id = S.calEventId;
   if (!id) return;
-  mt.calEventId = null;
-  mtSave();
+  S.calEventId = null;
+  (S === atm ? atSave : mtSave)();
   if (!calConnected() || !gcal.hasScope(CAL_SCOPE) || !navigator.onLine) return; // 못 지우면 다음 반영 때 정리됨
   gcal.api('DELETE', `${eventsPath(calMeta().calendarId)}/${id}`).catch(() => {});
 }
@@ -647,9 +777,10 @@ async function refreshPlayers() {
       }
       return out;
     };
-    const m = musicMeta(), sp = plById(m.studyPl), ap = plById(m.alarmPl), op = openPl();
+    const m = musicMeta(), sp = plById(m.studyPl), ap = plById(m.alarmPl), a2 = plById(m.alarm2Pl), op = openPl();
     study.setList(await build(sp), sp ? sp.repeat !== false : true);
     music.setList(await build(ap), ap ? ap.repeat !== false : false);
+    alarm2.setList(await build(a2), a2 ? a2.repeat !== false : false);
     preview.setList(op && op.id !== m.studyPl ? await build(op) : [], op ? op.repeat !== false : false);
   })();
   try { await refreshing; } catch (e) { console.warn(e); } finally {
@@ -731,7 +862,7 @@ const KEEP_KEY = 'planner.music.keep.v1';
 const keepPls = () => { try { return JSON.parse(localStorage.getItem(KEEP_KEY)) || []; } catch { return []; } };
 function wantedIds() {
   const m = musicMeta(), ids = new Set();
-  for (const pid of [m.studyPl, m.alarmPl, ...keepPls()]) for (const id of plById(pid)?.items || []) ids.add(id);
+  for (const pid of [m.studyPl, m.alarmPl, m.alarm2Pl, ...keepPls()]) for (const id of plById(pid)?.items || []) ids.add(id);
   return [...ids];
 }
 function driveWork() {
@@ -897,19 +1028,24 @@ function pipBuild() {
   let timerHtml;
   if (mt.alarm) {
     const min = Math.round(mtSession() / 60000);
-    timerHtml = `<div class="tm alarm"><div class="trow"><b>⏰ 타이머 종료</b>${min >= 1 ? `<span class="tlabel">${min}분 집중</span>` : ''}</div>
+    timerHtml = `<div class="tm alarm"><div class="trow"><b>⏰ 공부 타이머 종료</b>${min >= 1 ? `<span class="tlabel">${min}분 집중</span>` : ''}</div>
       <div class="pills">${min >= 1 ? '<button class="pill main" id="pRec">기록하고 닫기</button><button class="pill" id="pNo">기록 없이</button>' : '<button class="pill main" id="pNo">확인</button>'}</div></div>`;
   } else if (mt.status === 'ready') {
-    timerHtml = `<div class="tm compact trow"><span class="tlabel">타이머</span><span class="tnum" id="pt">${fmtClock(rem)}</span><span class="tbtns"><button class="rb main" id="pMain" title="시작">${ICON_PLAY}</button></span></div>`;
+    timerHtml = `<div class="tm compact trow"><span class="tlabel">공부</span><span class="tnum" id="pt">${fmtClock(rem)}</span><span class="tbtns"><button class="rb main" id="pMain" title="시작">${ICON_PLAY}</button></span></div>`;
   } else {
     timerHtml = `<div class="tm"><div class="bar ${mt.status === 'done' ? 'done' : ''}"><i id="pbar" style="width:${(ratio * 100).toFixed(2)}%"></i></div>
       <div class="trow"><span class="tnum" id="pt">${fmtClock(rem)}</span><span class="tlabel" id="ps">${MT_LABEL[mt.status]}</span>
         <span class="tbtns"><button class="rb" id="pReset" title="리셋">${ICON_RESET}</button><button class="rb main" id="pMain" title="${run ? '일시정지' : '시작'}">${run ? ICON_PAUSE : ICON_PLAY}</button><button class="rb" id="pAdd" title="1분 추가">+1m</button></span></div></div>`;
   }
 
+  // 알람 타이머는 돌고 있거나 멈춰 있을 때·끝났을 때만 한 줄로
+  let atHtml = '';
+  if (atm.alarm) atHtml = `<div class="tm alarm compact trow"><b>⏰ 알람 타이머 종료</b><span class="tbtns"><button class="pill main" id="paOk">확인</button></span></div>`;
+  else if (atm.status === 'running' || atm.status === 'paused') atHtml = `<div class="tm compact trow"><span class="tlabel">알람</span><span class="tnum" id="pat">${fmtClock(atRemain())}</span><span class="tbtns"><button class="rb" id="paMain" title="${atRunning() ? '일시정지' : '시작'}">${atRunning() ? ICON_PAUSE : ICON_PLAY}</button></span></div>`;
+
   d.body.innerHTML = `<header><span class="ttl">오늘의 미션</span><span class="cnt">${tasks.length ? `${doneN}/${tasks.length} 완료` : fmtMDW(today)}</span></header>
     <div class="list" id="plist">${tasks.length ? `<ol>${rows}</ol>` : '<p class="empty">오늘 과제가 없습니다. 플래너에서 추가하면 여기에 표시됩니다.</p>'}${proj ? `<div class="proj">${proj}</div>` : ''}</div>
-    ${timerHtml}`;
+    ${atHtml}${timerHtml}`;
   d.getElementById('plist').scrollTop = scroll;
   d.querySelectorAll('.q').forEach(b => {
     b.onclick = () => {
@@ -923,6 +1059,8 @@ function pipBuild() {
   on('pAdd', () => mtAdd(60));
   on('pRec', () => mtDismiss(true));
   on('pNo', () => mtDismiss(false));
+  on('paMain', () => atToggle());
+  on('paOk', () => atDismiss());
 }
 const pipRefresh = () => { if (pipWin) pipBuild(); };
 function pipUpdate(txt, ratio) {
@@ -1003,7 +1141,8 @@ function syncBadge(id = 'sync-badge') {
 function timerMini() {
   let html = '';
   if (timer && !(ui.view === 'day' && ui.day === todayStr())) html += `<button class="timer-mini" data-action="goto-day" data-date="${todayStr()}" aria-label="시작 타이머로 이동"><span id="timer-mini-text"></span></button>`;
-  if (mtRunning() && ui.view !== 'timer') html += `<button class="timer-mini alt" data-action="nav" data-view="timer" aria-label="타이머로 이동"><span id="mt-mini-text">${fmtClock(mtRemain())}</span></button>`;
+  if (mtRunning() && ui.view !== 'timer') html += `<button class="timer-mini alt" data-action="timer-goto" data-t="study" aria-label="공부 타이머로 이동"><span id="mt-mini-text">${fmtClock(mtRemain())}</span></button>`;
+  if (atRunning() && ui.view !== 'timer') html += `<button class="timer-mini alt2" data-action="timer-goto" data-t="alarm" aria-label="알람 타이머로 이동"><span aria-hidden="true">⏰</span><span id="at-mini-text">${fmtClock(atRemain())}</span></button>`;
   return html;
 }
 
@@ -1599,7 +1738,8 @@ function musicCard() {
   const opt = (sel, none) => `<option value="">${none}</option>${pls.map(p => `<option value="${p.id}" ${sel === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}`;
   const roles = `<div class="pl-roles">
       <label class="field inline"><span>공부할 때</span><select data-change="pl-role" data-role="studyPl" data-key="pl-role|studyPl" aria-label="공부할 때 틀 플리">${opt(m.studyPl, '안 틀기')}</select></label>
-      <label class="field inline"><span>타이머 알람</span><select data-change="pl-role" data-role="alarmPl" data-key="pl-role|alarmPl" aria-label="타이머 알람으로 쓸 플리">${opt(m.alarmPl, '기본 알림음')}</select></label>
+      <label class="field inline"><span>공부 타이머 종료</span><select data-change="pl-role" data-role="alarmPl" data-key="pl-role|alarmPl" aria-label="공부 타이머가 끝날 때 울릴 플리">${opt(m.alarmPl, '기본 알림음')}</select></label>
+      <label class="field inline"><span>알람 타이머 종료</span><select data-change="pl-role" data-role="alarm2Pl" data-key="pl-role|alarm2Pl" aria-label="알람 타이머가 끝날 때 울릴 플리">${opt(m.alarm2Pl, '기본 알림음')}</select></label>
     </div>`;
   const w = driveWork(), pending = w.up.length || w.down.length || w.del.length;
   const driveLine = !gcal.available
@@ -1607,11 +1747,11 @@ function musicCard() {
     : `<div class="drive-line"><span class="muted small">☁ ${driveBusy ? esc(ui.musicProgress || '드라이브와 주고받는 중…')
         : pending ? [w.up.length && `올릴 곡 ${w.up.length}`, w.down.length && `받을 곡 ${w.down.length}`, w.del.length && `정리할 파일 ${w.del.length}`].filter(Boolean).join(' · ')
         : '모든 기기와 맞춰져 있음'}</span>${pending && !driveBusy ? `<button type="button" class="btn sm" data-action="drive-sync">${gcal.hasScope(DRIVE_SCOPE) ? '지금 주고받기' : '드라이브 연결'}</button>` : ''}</div>`;
-  const chips = `<div class="pl-chips">${pls.map(p => `<button type="button" class="pl-chip ${pl && p.id === pl.id ? 'on' : ''}" data-action="pl-open" data-pl="${p.id}">${esc(p.name)}${p.id === m.studyPl ? '<small>공부</small>' : ''}${p.id === m.alarmPl ? '<small>알람</small>' : ''}</button>`).join('')}</div>
+  const chips = `<div class="pl-chips">${pls.map(p => `<button type="button" class="pl-chip ${pl && p.id === pl.id ? 'on' : ''}" data-action="pl-open" data-pl="${p.id}">${esc(p.name)}${p.id === m.studyPl ? '<small>공부</small>' : ''}${p.id === m.alarmPl ? '<small>공부 종료</small>' : ''}${p.id === m.alarm2Pl ? '<small>알람 종료</small>' : ''}</button>`).join('')}</div>
     <div class="add-row tight"><input id="pl-new-name" data-enter="pl-new" placeholder="새 플리 이름" maxlength="40" autocomplete="off" aria-label="새 플리 이름"><button type="button" class="btn sm" data-action="pl-new">플리 만들기</button></div>`;
   if (!pl) {
     return `<article class="card music">${head}<div class="music-body">${roles}${driveLine}${chips}
-      <p class="muted small">플리를 만들고 곡을 추가하세요. 만든 플리는 '공부할 때'나 '타이머 알람'으로 골라 쓸 수 있고, 모든 기기에서 같은 플리를 씁니다.</p></div></article>`;
+      <p class="muted small">플리를 만들고 곡을 추가하세요. 만든 플리는 '공부할 때', '공부 타이머 종료', '알람 타이머 종료'에 골라 쓸 수 있고, 모든 기기에서 같은 플리를 씁니다.</p></div></article>`;
   }
   const P = uiPlayer(), isStudy = pl.id === m.studyPl, locked = isStudy && !studyActive();
   const items = (pl.items || []).map(id => trackById(id)).filter(Boolean);
@@ -1639,7 +1779,7 @@ function musicCard() {
         <button type="button" class="btn sm" data-action="pl-repeat" data-pl="${pl.id}">${pl.repeat !== false ? '반복 켜짐' : '반복 꺼짐'}</button>
         <button type="button" class="btn sm danger" data-action="pl-del" data-pl="${pl.id}">플리 삭제</button>
       </div>
-      ${isStudy ? '<p class="muted small">공부할 때 쓰는 플리라 타이머가 돌 때만 재생되고, 멈추면 같이 멈춥니다.</p>' : ''}
+      ${isStudy ? '<p class="muted small">공부할 때 쓰는 플리라 공부 타이머나 시작 타이머가 돌 때만 재생되고, 멈추면 같이 멈춥니다. 알람 타이머와는 상관없습니다.</p>' : ''}
       <div class="btn-row tight wrap">
         <label class="btn sm file-btn">+ 파일 추가<input type="file" id="pl-file" data-pl="${pl.id}" accept="audio/*" multiple hidden></label>
         <button type="button" class="btn sm ${ui.libPick ? 'primary' : ''}" data-action="lib-pick">+ 전체 곡에서</button>
@@ -1653,7 +1793,7 @@ function musicCard() {
           <button class="round-btn main sm" data-action="mp-toggle" ${locked ? 'disabled' : ''} aria-label="재생/일시정지">${P.playing ? ICON_PAUSE : ICON_PLAY}</button>
           <button class="round-btn sm" data-action="mp-next" ${locked ? 'disabled' : ''} aria-label="다음 곡">⏭</button>
         </div>
-        <div class="now">${locked ? '타이머가 돌 때 재생됩니다' : P.cur >= 0 && P.list[P.cur] ? esc(P.list[P.cur].name) : '트랙 없음'}</div>
+        <div class="now">${locked ? '공부 타이머가 돌 때 재생됩니다' : P.cur >= 0 && P.list[P.cur] ? esc(P.list[P.cur].name) : '트랙 없음'}</div>
         <input type="range" id="mp-seek" min="0" max="1000" value="0" aria-label="재생 위치">
         <div class="time-row"><span id="mp-cur">0:00</span><span id="mp-dur">0:00</span></div>
       </div>` : ''}
@@ -1664,46 +1804,71 @@ function musicCard() {
   </div></article>`;
 }
 
-function viewTimer() {
-  const rem = mtRemain(), ratio = mt.totalMs > 0 ? rem / mt.totalMs : 0, run = mtRunning();
-  const set = Math.round(mt.setMs / 1000), h = Math.floor(set / 3600), m = Math.floor((set % 3600) / 60), s = set % 60;
-  const task = topTask(todayStr())?.text;
-  const pipOk = 'documentPictureInPicture' in window;
+// 공부 타이머(mt)와 알람 타이머(atm)는 같은 모양을 씀. 공부 타이머의 id(mt-…)는 예전 그대로
+function timerFace(kind) {
+  const S = kind === 'study', st = S ? mt : atm, pre = S ? 'mt' : 'at';
+  const run = S ? mtRunning() : atRunning(), rem = S ? mtRemain() : atRemain(), ratio = st.totalMs > 0 ? rem / st.totalMs : 0;
+  const set = Math.round(st.setMs / 1000), h = Math.floor(set / 3600), m = Math.floor((set % 3600) / 60), s = set % 60;
   const fields = [['h', h, 23, '시간'], ['m', m, 59, '분'], ['s', s, 59, '초']]
-    .map(([k, v, max, lb], i) => `${i ? '<span class="mt-colon">:</span>' : ''}<label class="mt-in"><input id="mt-${k}" type="number" inputmode="numeric" min="0" max="${max}" value="${v}" ${run ? 'disabled' : ''} data-mt-input aria-label="${lb}"><span>${lb}</span></label>`).join('');
+    .map(([k, v, max, lb], i) => `${i ? '<span class="mt-colon">:</span>' : ''}<label class="mt-in"><input id="${pre}-${k}" type="number" inputmode="numeric" min="0" max="${max}" value="${v}" ${run ? 'disabled' : ''} data-${pre}-input aria-label="${lb}"><span>${lb}</span></label>`).join('');
+  return `<div class="mt-ring-wrap">
+        <svg class="mt-ring" viewBox="0 0 256 256" aria-hidden="true">
+          <circle class="mt-track" cx="128" cy="128" r="${MT_R}"/>
+          <circle id="${pre}-ring" class="mt-prog ${st.status === 'done' ? 'done' : ''}" cx="128" cy="128" r="${MT_R}" stroke-dasharray="${MT_C.toFixed(2)}" style="stroke-dashoffset:${(MT_C * (1 - ratio)).toFixed(2)}"/>
+        </svg>
+        <div class="mt-center"><span id="${pre}-display" class="mt-num">${fmtClock(rem)}</span><span id="${pre}-label" class="mt-label">${MT_LABEL[st.status]}</span></div>
+      </div>
+      <div class="mt-inputs ${run ? 'dim' : ''}">${fields}</div>
+      <div class="mt-presets">${[[1, '+1분'], [5, '+5분'], [10, '+10분'], [30, '+30분'], [60, '+1시간']].map(([n, l]) => `<button class="chip-btn" data-action="${pre}-preset" data-min="${n}">${l}</button>`).join('')}</div>
+      <div class="mt-controls">
+        <button class="round-btn" data-action="${pre}-reset" aria-label="리셋">${ICON_RESET}</button>
+        <button class="round-btn main" data-action="${pre}-toggle" aria-label="${run ? '일시정지' : '시작'}">${run ? ICON_PAUSE : ICON_PLAY}</button>
+        <button class="round-btn" data-action="${pre}-add" aria-label="1분 추가">+1m</button>
+      </div>
+      ${run && calConnected() ? `<p class="muted small center">${st.calEventId ? '📅 끝나는 시각을 캘린더에도 넣었습니다.' : '📅 캘린더 연결이 만료돼 앱 알람만 울립니다.'}</p>` : ''}`;
+}
+
+function viewTimer() {
+  const task = topTask(todayStr())?.text, tab = ui.timerTab === 'alarm' ? 'alarm' : 'study';
+  const pipOk = 'documentPictureInPicture' in window;
+  const a2 = plById(musicMeta().alarm2Pl);
+  const segBtn = (t, label, running, rem, id) => `<button type="button" class="${tab === t ? 'on' : ''}" data-action="timer-tab" data-t="${t}" role="tab" aria-selected="${tab === t}">${label}${running ? ` <span id="${id}" class="seg-time">${fmtClock(rem)}</span>` : ''}</button>`;
   return `<section class="view">
     <header class="vhead plain">
       <div class="vtitle"><h1>타이머</h1><span class="sub">${task ? `오늘: ${esc(task)}` : '오늘 과제를 정하면 여기와 미션 창에 표시됩니다'}</span></div>
       ${pipOk ? `<button class="btn ${pipWin ? 'primary' : ''}" data-action="mt-pip">${pipWin ? '미션 창 닫기' : '미션 창'}</button>` : ''}
     </header>
-    ${mt.offer ? offerCard() : ''}
+    <div class="seg timer-seg" role="tablist" aria-label="타이머 종류">
+      ${segBtn('study', '📚 공부', mtRunning(), mtRemain(), 'mt-seg')}
+      ${segBtn('alarm', '⏰ 알람', atRunning(), atRemain(), 'at-seg')}
+    </div>
+    ${tab === 'study' ? `${mt.offer ? offerCard() : ''}
     <article class="card mt-card">
-      <div class="mt-ring-wrap">
-        <svg class="mt-ring" viewBox="0 0 256 256" aria-hidden="true">
-          <circle class="mt-track" cx="128" cy="128" r="${MT_R}"/>
-          <circle id="mt-ring" class="mt-prog ${mt.status === 'done' ? 'done' : ''}" cx="128" cy="128" r="${MT_R}" stroke-dasharray="${MT_C.toFixed(2)}" style="stroke-dashoffset:${(MT_C * (1 - ratio)).toFixed(2)}"/>
-        </svg>
-        <div class="mt-center"><span id="mt-display" class="mt-num">${fmtClock(rem)}</span><span id="mt-label" class="mt-label">${MT_LABEL[mt.status]}</span></div>
-      </div>
-      <div class="mt-inputs ${run ? 'dim' : ''}">${fields}</div>
-      <div class="mt-presets">${[[1, '+1분'], [5, '+5분'], [10, '+10분'], [30, '+30분'], [60, '+1시간']].map(([n, l]) => `<button class="chip-btn" data-action="mt-preset" data-min="${n}">${l}</button>`).join('')}</div>
-      <div class="mt-controls">
-        <button class="round-btn" data-action="mt-reset" aria-label="리셋">${ICON_RESET}</button>
-        <button class="round-btn main" data-action="mt-toggle" aria-label="${run ? '일시정지' : '시작'}">${run ? ICON_PAUSE : ICON_PLAY}</button>
-        <button class="round-btn" data-action="mt-add" aria-label="1분 추가">+1m</button>
-      </div>
-      ${run && calConnected() ? `<p class="muted small center">${mt.calEventId ? '📅 끝나는 시각을 캘린더에도 넣었습니다.' : '📅 캘린더 연결이 만료돼 앱 알람만 울립니다.'}</p>` : ''}
-    </article>
+      ${timerFace('study')}
+    </article>` : `<article class="card mt-card at-card">
+      ${timerFace('alarm')}
+      <p class="muted small center">집중 시간 기록·공부 플리 없이 시간만 잽니다. 끝나면 ${a2 ? `'${esc(a2.name)}' 플리가` : '기본 알림음이'} 울립니다.</p>
+    </article>`}
     ${musicCard()}
   </section>`;
+}
+
+function atAlarmOverlay() {
+  if (mt.alarm || !atm.alarm) return '';
+  return `<div class="alarm-ov" role="alertdialog" aria-label="알람 타이머 종료"><div class="alarm-box">
+    <div class="alarm-icon" aria-hidden="true">⏰</div>
+    <b>알람 타이머 종료</b>
+    <p class="muted">${fmtDurMs(atm.totalMs)} 알람 타이머가 끝났습니다.</p>
+    <div class="btn-col"><button class="btn primary" data-action="at-dismiss">확인</button>${atm.setMs > 0 ? `<button class="btn" data-action="at-again">${fmtDurMs(atm.setMs)} 다시 시작</button>` : ''}</div>
+  </div></div>`;
 }
 
 function alarmOverlay() {
   if (!mt.alarm) return '';
   const min = Math.round(mtSession() / 60000);
-  return `<div class="alarm-ov" role="alertdialog" aria-label="타이머 종료"><div class="alarm-box">
+  return `<div class="alarm-ov" role="alertdialog" aria-label="공부 타이머 종료"><div class="alarm-box">
     <div class="alarm-icon" aria-hidden="true">⏰</div>
-    <b>타이머 종료</b>
+    <b>공부 타이머 종료</b>
     ${min >= 1
       ? `<p class="muted">이번에 ${min}분 집중했습니다. 집중 시간에 기록할까요?</p>
          <div class="btn-col"><button class="btn primary" data-action="mt-dismiss" data-rec="1">기록하고 닫기</button><button class="btn" data-action="mt-dismiss" data-rec="0">기록 없이 닫기</button></div>`
@@ -1712,7 +1877,7 @@ function alarmOverlay() {
 }
 
 function appAlarmOverlay() {
-  if (mt.alarm || !ui.alarms.length) return '';
+  if (mt.alarm || atm.alarm || !ui.alarms.length) return '';
   return `<div class="alarm-ov" role="alertdialog" aria-label="알림"><div class="alarm-box">
     <div class="alarm-icon" aria-hidden="true">⏰</div>
     <ul class="alarm-list">${ui.alarms.map(a => `<li><b>${esc(a.title)}</b>${a.body ? `<span>${esc(a.body)}</span>` : ''}<small class="muted">${hmOf(a.at)}</small></li>`).join('')}</ul>
@@ -1899,6 +2064,7 @@ function shell() {
     ${s.error ? `<div class="banner" role="alert"><span>${esc(s.error)}</span><button class="link-btn" data-action="dismiss-error">닫기</button></div>` : ''}
     <main class="main ${ui.view === 'month' ? 'wide' : ''}">${views[ui.view]()}</main>
     ${alarmOverlay()}
+    ${atAlarmOverlay()}
     ${appAlarmOverlay()}
     ${checklistOverlay()}
   </div>`;
@@ -2204,6 +2370,19 @@ const actions = {
   'mt-record'() { if (!mt.offer) return; recordFocus(mt.offer.min, mt.offer.date); mt.offer = null; mtSave(); scheduleRender(); },
   'mt-norecord'() { mt.offer = null; mtSave(); scheduleRender(); },
   'mt-pip'() { togglePip(); },
+  'at-toggle'() { atToggle(); },
+  'at-reset'() { atReset(); },
+  'at-add'() { atAdd(60); },
+  'at-preset'(el) { atPreset(Number(el.dataset.min)); },
+  'at-dismiss'() { atDismiss(); },
+  'at-again'() {
+    atDismiss();
+    const t = atm.setMs > 0 ? atm.setMs : AT_DEFAULT;
+    Object.assign(atm, { status: 'ready', totalMs: t, remainMs: t });
+    atToggle();
+  },
+  'timer-tab'(el) { setTimerTab(el.dataset.t); render(); },
+  'timer-goto'(el) { setTimerTab(el.dataset.t); ui.view = 'timer'; render(); scrollTop(); },
   'music-open'() { ui.musicOpen = !ui.musicOpen; render(); },
   'pl-open'(el) { ui.plOpen = el.dataset.pl; ui.libPick = false; if (preview.playing) preview.pause(); refreshPlayers(); render(); },
   'pl-new'() {
@@ -2218,7 +2397,7 @@ const actions = {
   'pl-del'(el) {
     const p = plById(el.dataset.pl), m = musicMeta();
     if (!p || !confirm(`'${p.name}' 플리를 지울까요? 곡은 '전체 곡'에 남습니다.`)) return;
-    saveMusic({ playlists: clonePls().filter(x => x.id !== p.id), ...(m.studyPl === p.id ? { studyPl: null } : {}), ...(m.alarmPl === p.id ? { alarmPl: null } : {}) });
+    saveMusic({ playlists: clonePls().filter(x => x.id !== p.id), ...(m.studyPl === p.id ? { studyPl: null } : {}), ...(m.alarmPl === p.id ? { alarmPl: null } : {}), ...(m.alarm2Pl === p.id ? { alarm2Pl: null } : {}) });
     ui.plOpen = null;
     refreshPlayers();
   },
@@ -2427,7 +2606,7 @@ $app.addEventListener('change', e => {
     return;
   }
   if (el.dataset.color) { commitThemeDraft(); return; }
-  if ('mtInput' in el.dataset) return;
+  if ('mtInput' in el.dataset || 'atInput' in el.dataset) return;
   if (el.dataset.tfield) { changeActions.tfield(el); if (el.dataset.tfield === 'alarm' && el.value) askNotify(); return; }
   if (el.dataset.alarm) {
     const A = alarmSet(), [k, sub] = el.dataset.alarm.split('.');
@@ -2451,6 +2630,7 @@ const dayRecLike = (col, id) => store.data[col]?.[id] || {};
 $app.addEventListener('input', e => {
   const el = e.target;
   if ('mtInput' in el.dataset) { mtFromInputs(); return; }
+  if ('atInput' in el.dataset) { atFromInputs(); return; }
   if (el.dataset.color) { themeInput(el); return; }
   if (el.id === 'mp-seek') uiPlayer().seek(Number(el.value) / 1000);
 });
@@ -2513,6 +2693,7 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
 }
 
 if (mtRunning() && mt.endTime <= Date.now()) mtFinish(true); // 앱이 꺼진 사이 끝난 타이머
+if (atRunning() && atm.endTime <= Date.now()) atFinish(true);
 cacheIds().then(ids => { cachedIds = ids; refreshPlayers(); }).catch(() => {});
 if (gcal.available && navigator.onLine) gcal.loadGis().catch(() => {}); // 버튼을 누르는 순간 바로 연결 창을 열 수 있게 미리 불러 둠
 render();

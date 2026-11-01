@@ -619,3 +619,16 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 .lib-pick ul, .lib-all ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .lib-pick li, .lib-all li { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 14px; }
 .lib-pick li span, .lib-all li span { min-width: 0; overflow-wrap: anywhere; }
+
+/* ── 공부 타이머 / 알람 타이머 나누기 ── */
+.timer-seg button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: 14.5px; padding: 9px 6px; }
+.seg-time { font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--accent); background: var(--accent-soft); border-radius: 99px; padding: 1px 7px; }
+.timer-seg button:last-child .seg-time { color: var(--warm); background: var(--warm-soft); }
+.at-card .mt-prog:not(.done) { stroke: var(--warm); }
+.timer-mini.alt2 { display: inline-flex; align-items: center; gap: 4px; background: var(--surface-2); color: var(--text); box-shadow: inset 0 0 0 1.5px var(--warm); }
+.timer-mini.alt2 > span:first-child { font-size: 11px; }
+.brand { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 좁은 화면에서 미니 타이머가 여러 개 뜨면 동기화 표시는 점만 남김 */
+@media (max-width: 480px) {
+  .topbar:has(.timer-mini + .timer-mini) .badge:not(.cal) { font-size: 0; gap: 0; padding: 7px; }
+}

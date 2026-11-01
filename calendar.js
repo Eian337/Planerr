@@ -137,7 +137,7 @@ async function remove(gcal, path) {
 }
 
 // 원하는 일정 목록(desired)에 맞춰 캘린더를 고침. 지난 일정은 건드리지 않음. 바꾼 개수를 돌려줌
-export async function syncCalendar(gcal, calId, desired, { from, deviceId, activeTimerId }) {
+export async function syncCalendar(gcal, calId, desired, { from, deviceId, activeTimerIds = [] }) {
   const base = eventsPath(calId);
   const items = [];
   let pageToken = '';
@@ -164,7 +164,7 @@ export async function syncCalendar(gcal, calId, desired, { from, deviceId, activ
   for (const [id, e] of have) {
     const p = e.extendedProperties?.private || {};
     if (p.kind === 'timer') {
-      const stale = t(e.end) < now - 10 * 60000 || (p.device === deviceId && id !== activeTimerId);
+      const stale = t(e.end) < now - 10 * 60000 || (p.device === deviceId && !activeTimerIds.includes(id));
       if (!stale) continue;
     } else if (t(e.start) < now) {
       continue; // 지난 일정은 기록으로 남겨 둠
