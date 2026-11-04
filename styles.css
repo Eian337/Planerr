@@ -10,6 +10,12 @@
   --accent-soft: #e0eae5;
   --warm: #c25f36;
   --warm-soft: #f6e4da;
+  --due: #c25f36;
+  --due-soft: #f6e4da;
+  --late: #c42048;
+  --late-soft: #eed5d5;
+  --carry: #6f52be;
+  --carry-soft: #e2dbe6;
   --danger: #b3412f;
   --radius: 14px;
   --shadow: 0 1px 2px rgba(31, 28, 24, .04), 0 6px 18px rgba(31, 28, 24, .04);
@@ -28,6 +34,12 @@
     --accent-soft: #213430;
     --warm: #e38c60;
     --warm-soft: #3b2a20;
+    --due: #e38c60;
+    --due-soft: #3b2a20;
+    --late: #ff6680;
+    --late-soft: #432428;
+    --carry: #b096ff;
+    --carry-soft: #332d41;
     --danger: #e57d6a;
     --shadow: none;
     color-scheme: dark;
@@ -230,9 +242,9 @@ input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); m
 .ev-main small { color: var(--muted); font-size: 12px; }
 .ev-date { font-size: 12.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ev.done .ev-main { color: var(--muted); text-decoration: line-through; }
-.ev.late .ev-date { color: var(--danger); font-weight: 700; }
-.ev-mark { width: 22px; height: 22px; border-radius: 6px; background: var(--warm-soft); color: var(--warm); display: grid; place-items: center; font-weight: 800; font-size: 13px; }
-.ev.deadline .ev-date { color: var(--warm); font-weight: 700; }
+.ev.late .ev-date { color: var(--late); font-weight: 700; }
+.ev-mark { width: 22px; height: 22px; border-radius: 6px; background: var(--due-soft); color: var(--due); display: grid; place-items: center; font-weight: 800; font-size: 13px; }
+.ev.deadline .ev-date { color: var(--due); font-weight: 700; }
 
 .goal { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
 .goal:first-child { border-top: 0; padding-top: 0; }
@@ -271,14 +283,14 @@ input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); m
 .cal-marks { display: flex; gap: 2px; position: absolute; bottom: 12%; }
 .cal-marks i { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
 .cal-cell.started .cal-marks i { background: var(--accent-ink); }
-.cal-marks i.mk-deadline, .cal-cell.started .cal-marks i.mk-deadline { background: var(--warm); }
+.cal-marks i.mk-deadline, .cal-cell.started .cal-marks i.mk-deadline { background: var(--due); }
 .cal-marks i.done { opacity: .4; }
 .cal-legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 12px; font-size: 12px; color: var(--muted); }
 .cal-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .lg { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
 .lg-start { background: var(--accent); }
 .lg-ms { background: var(--accent); width: 6px; height: 6px; border-radius: 50%; }
-.lg-dl { background: var(--warm); width: 6px; height: 6px; border-radius: 50%; }
+.lg-dl { background: var(--due); width: 6px; height: 6px; border-radius: 50%; }
 
 /* ── 장기 과제 ── */
 .project { padding: 0; overflow: hidden; }
@@ -294,13 +306,13 @@ input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); m
 .bar { height: 6px; margin: 0 16px; background: var(--surface-2); border-radius: 99px; overflow: hidden; }
 .bar i { display: block; height: 100%; background: var(--accent); border-radius: 99px; transition: width .3s; }
 .proj-next { margin: 8px 16px 14px; font-size: 13.5px; color: var(--muted); }
-.proj-next.late { color: var(--danger); }
+.proj-next.late { color: var(--late); }
 .proj-next.ok { color: var(--accent); font-weight: 600; }
 .proj-detail { border-top: 1px solid var(--line); padding: 14px 16px 16px; }
 .ms { display: grid; grid-template-columns: 22px 1fr 152px 30px; gap: 8px; align-items: center; padding: 4px 0; }
 .ms input.ms-title, .ms input.ms-due { min-height: 38px; padding: 7px 10px; font-size: 15px; }
 .ms.done .ms-title { text-decoration: line-through; color: var(--muted); }
-.ms.late .ms-due { color: var(--danger); }
+.ms.late .ms-due { color: var(--late); }
 @media (max-width: 520px) {
   .ms { grid-template-columns: 22px 1fr 30px; grid-template-areas: "c t x" ". d ."; row-gap: 4px; padding: 6px 0; }
   .ms > input[type=checkbox] { grid-area: c; }
@@ -511,11 +523,11 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 
 /* ── 과제 마감일 ── */
 .due-tag { font-size: 12px; color: var(--muted); font-weight: 600; margin-left: 4px; white-space: nowrap; }
-.due-tag.soon { color: var(--warm); font-weight: 700; }
-.due-tag.late { color: var(--danger); font-weight: 700; }
+.due-tag.soon { color: var(--due); font-weight: 700; }
+.due-tag.late { color: var(--late); font-weight: 700; }
 .add-row .due-in { flex: 0 1 150px; width: auto; }
-.cal-marks i.mk-tdue, .cal-cell.started .cal-marks i.mk-tdue { background: var(--warm); }
-.ev.tdue.late .ev-date { color: var(--danger); font-weight: 700; }
+.cal-marks i.mk-tdue, .cal-cell.started .cal-marks i.mk-tdue { background: var(--due); }
+.ev.tdue.late .ev-date { color: var(--late); font-weight: 700; }
 
 /* ── 과제 세분화 ── */
 .steps { list-style: none; margin: 0 0 4px; padding: 0; display: flex; flex-direction: column; }
@@ -526,11 +538,11 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 .add-row.tight input { min-height: 38px; padding: 7px 10px; font-size: 15px; }
 .now-task .step .check span { font-size: 15px; }
 .steps-done { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--surface); border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; font-size: 14px; font-weight: 600; color: var(--accent); }
-.stuck { background: var(--warm-soft); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 13.5px; }
-.stuck b { color: var(--warm); }
+.stuck { background: var(--carry-soft); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 13.5px; }
+.stuck b { color: var(--carry); }
 .stuck .btn-row { margin-top: 6px; }
 .carry-tag { color: var(--muted); }
-.carry-tag.warn { color: var(--warm); font-weight: 700; }
+.carry-tag.warn { color: var(--carry); font-weight: 700; }
 .tr-slot { color: var(--accent); font-weight: 700; }
 
 /* ── 시간표 ── */
@@ -632,3 +644,5 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 @media (max-width: 480px) {
   .topbar:has(.timer-mini + .timer-mini) .badge:not(.cal) { font-size: 0; gap: 0; padding: 7px; }
 }
+.ce-group { font-size: 13px; font-weight: 700; color: var(--muted); margin: 14px 0 8px; }
+.ce-group:first-of-type { margin-top: 4px; }

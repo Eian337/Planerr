@@ -1,6 +1,6 @@
 // 학업 플래너 — 화면과 동작
 import { Store } from './store.js';
-import { applyTheme, cachedTheme, cacheTheme, PRESETS, COLOR_DEFS, rgb } from './theme.js';
+import { applyTheme, cachedTheme, cacheTheme, fillTheme, PRESETS, COLOR_DEFS, COLOR_KEYS, rgb } from './theme.js';
 import { Player, cacheGet, cachePut, cacheDelete, cacheIds, legacyTracks, legacyClear } from './music.js';
 import { ensureFolder, uploadFile, downloadFile, deleteFile } from './drive.js';
 import * as CFG from './config.js';
@@ -9,7 +9,7 @@ import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timeta
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.10.0';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -960,7 +960,7 @@ function pipBuild() {
   const d = pipWin.document;
   const c = {
     bg: cssVar('--bg'), s2: cssVar('--surface-2'), line: cssVar('--line'), accent: cssVar('--accent'), soft: cssVar('--accent-soft'),
-    ink: cssVar('--accent-ink'), text: cssVar('--text'), muted: cssVar('--muted'), warm: cssVar('--warm'), danger: cssVar('--danger'),
+    ink: cssVar('--accent-ink'), text: cssVar('--text'), muted: cssVar('--muted'), warm: cssVar('--warm'), danger: cssVar('--danger'), due: cssVar('--due'), late: cssVar('--late'),
   };
   const today = todayStr(), tasks = getTasks(today), top = tasks.find(t => !t.done), doneN = tasks.filter(t => t.done).length;
   const rem = mtRemain(), ratio = mt.totalMs > 0 ? rem / mt.totalMs : 0, run = mtRunning();
@@ -985,14 +985,14 @@ function pipBuild() {
     .qt{word-break:keep-all;overflow-wrap:anywhere}
     .al{font-size:11px;color:${c.warm};font-weight:700;white-space:nowrap}
     .ns{font-size:12px;color:${c.accent};font-weight:700;padding:0 6px 4px 29px}
-    .du{font-size:11px;color:${c.muted};white-space:nowrap} .du.soon{color:${c.warm};font-weight:700} .du.late{color:${c.danger};font-weight:700}
+    .du{font-size:11px;color:${c.muted};white-space:nowrap} .du.soon{color:${c.due};font-weight:700} .du.late{color:${c.late};font-weight:700}
     .empty{color:${c.muted};margin:0;padding:8px 6px}
     .proj{margin-top:6px;padding:6px 0 0;border-top:1px dashed ${c.line}}
     .pj{display:flex;gap:6px;align-items:flex-start;padding:3px 6px;font-size:12px;color:${c.muted}}
     .pj b{color:${c.text};font-weight:600}
-    .pj .mk{color:${c.warm};flex:none}
-    .pj .dd{margin-left:auto;padding-left:6px;white-space:nowrap;color:${c.warm};font-weight:700}
-    .pj.late .dd{color:${c.danger}}
+    .pj .mk{color:${c.due};flex:none}
+    .pj .dd{margin-left:auto;padding-left:6px;white-space:nowrap;color:${c.due};font-weight:700}
+    .pj.late .dd{color:${c.late}}
     .tm{border-top:1px solid ${c.line};padding:8px 10px 10px}
     .bar{height:4px;background:${c.s2};border-radius:9px;overflow:hidden;margin-bottom:8px}
     .bar i{display:block;height:100%;background:${c.accent};transition:width .3s linear}
@@ -1090,12 +1090,12 @@ function saveTheme(th) {
   store.set('meta', 'settings', { theme: th });
   pipRefresh();
 }
+const themeFrom = (p, mode) => ({ mode, ...Object.fromEntries(COLOR_KEYS.map(k => [k, { ...p[k] }])) });
 function currentTheme() {
   const th = ui.themeDraft || settings().theme;
-  if (th && th.mode === 'custom' && th.bg) return th;
+  if (th && th.mode === 'custom' && th.bg) return fillTheme(th);
   const dark = matchMedia('(prefers-color-scheme: dark)').matches;
-  const p = PRESETS.find(x => x.id === (dark ? 'forest-dark' : 'forest'));
-  return { mode: 'auto', bg: { ...p.bg }, accent: { ...p.accent }, text: { ...p.text }, warm: { ...p.warm } };
+  return themeFrom(PRESETS.find(x => x.id === (dark ? 'forest-dark' : 'forest')), 'auto');
 }
 function themeInput(el) {
   const id = el.dataset.color, ch = el.dataset.ch;
@@ -1942,11 +1942,13 @@ function colorEditor(def, c) {
 
 function colorCard() {
   const th = currentTheme(), custom = th.mode === 'custom';
-  const same = p => custom && ['bg', 'accent', 'text', 'warm'].every(k => JSON.stringify(p[k]) === JSON.stringify({ r: th[k].r, g: th[k].g, b: th[k].b }));
+  const same = p => custom && COLOR_KEYS.every(k => JSON.stringify(p[k]) === JSON.stringify({ r: th[k].r, g: th[k].g, b: th[k].b }));
+  const group = (g, title) => `<h3 class="ce-group">${title}</h3><div class="color-editors">${COLOR_DEFS.filter(d => d.group === g).map(d => colorEditor(d, th[d.id])).join('')}</div>`;
   return `<article class="card">
     <div class="card-head"><h2>색상</h2><span class="muted small">${custom ? '직접 지정' : '기기 설정 따라감'}</span></div>
     <div class="theme-row">${PRESETS.map(p => `<button class="theme-chip ${same(p) ? 'active' : ''}" data-action="theme-preset" data-id="${p.id}" style="--c-bg:${rgb(p.bg)};--c-ac:${rgb(p.accent)}"><i></i><span>${p.label}</span></button>`).join('')}</div>
-    <div class="color-editors">${COLOR_DEFS.map(d => colorEditor(d, th[d.id])).join('')}</div>
+    ${group('base', '기본 색')}
+    ${group('mark', '표시 색')}
     ${custom ? `<div class="btn-row"><button class="btn" data-action="theme-auto">기본값(라이트·다크 자동)으로 되돌리기</button></div>` : ''}
     <p class="muted small">플래너·타이머·미션 창 전체에 적용되고, 같은 계정으로 로그인한 기기에도 동기화됩니다.</p>
   </article>`;
@@ -2426,7 +2428,7 @@ const actions = {
     const p = PRESETS.find(x => x.id === el.dataset.id);
     if (!p) return;
     ui.themeDraft = null;
-    saveTheme({ mode: 'custom', bg: { ...p.bg }, accent: { ...p.accent }, text: { ...p.text }, warm: { ...p.warm } });
+    saveTheme(themeFrom(p, 'custom'));
   },
   'theme-auto'() { ui.themeDraft = null; saveTheme({ mode: 'auto' }); },
 };
