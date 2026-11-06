@@ -646,3 +646,11 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 }
 .ce-group { font-size: 13px; font-weight: 700; color: var(--muted); margin: 14px 0 8px; }
 .ce-group:first-of-type { margin-top: 4px; }
+
+/* ── 백업에서 되살리기 ── */
+.restore { margin-top: 12px; padding: 12px; border-radius: 12px; background: var(--surface-2); display: grid; gap: 10px; }
+.restore p { margin: 0; }
+.rs-day { display: grid; gap: 6px; }
+.rs-day > b { font-size: 14px; }
+.rs-item { align-items: flex-start; }
+.rs-item small { display: block; margin-top: 2px; }

@@ -3,7 +3,8 @@
 // 없으면 이 기기의 브라우저에만 저장하는 '로컬 모드'로 동작합니다.
 //
 // 저장 구조 (클라우드: users/{uid}/{컬렉션}/{문서}, 로컬: 같은 모양의 JSON)
-//   days/{YYYY-MM-DD}  하루 기록: task, action, cue, started, startedAt, focusMin, done, projectId, milestoneId
+//   days/{YYYY-MM-DD}  하루 기록: tmap{과제 id: {text, memo, steps, due, …, o(순서)}}, started, startedAt, focusMin
+//                      (v1.10 이전: tasks[] 배열, 그보다 전: task, action, cue, done, projectId, milestoneId)
 //   projects/{id}      장기 과제: name, start, deadline, buffer, milestones[{id,title,due,done}], archived
 //   weeks/{월요일 날짜} 주간 목표: goals[{id,text,done,projectId}]
 //   meta/settings      설정: timerMin
@@ -15,6 +16,22 @@ const LOCAL_KEY = 'planner.local.v1';
 export const COLS = ['days', 'projects', 'weeks', 'meta'];
 const emptyData = () => ({ days: {}, projects: {}, weeks: {}, meta: {} });
 const clean = v => JSON.parse(JSON.stringify(v));
+
+// patch()에서 '이 항목을 지움'을 뜻하는 표시
+export const DELETE = Symbol('delete');
+const isPlain = v => v !== null && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
+
+// Firestore의 병합 저장과 같은 규칙으로 합침: 객체는 안쪽까지 합치고, 배열·값은 통째로 바꾸고, 빈 객체는 빈 객체로 바꿈
+export function mergeDeep(base, patch) {
+  const out = isPlain(base) ? { ...base } : {};
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === DELETE) delete out[k];
+    else if (v === undefined) continue;
+    else if (isPlain(v) && Object.keys(v).length) out[k] = mergeDeep(out[k], v);
+    else out[k] = isPlain(v) ? {} : clean(v);
+  }
+  return out;
+}
 const hasConfig = !!(firebaseConfig && firebaseConfig.apiKey && firebaseConfig.projectId);
 
 export class Store {
@@ -30,6 +47,7 @@ export class Store {
       error: null,
     };
     this._pending = {};
+    this._fresh = {};
     this._unsubs = [];
     addEventListener('online', () => this._setStatus({ online: true }));
     addEventListener('offline', () => this._setStatus({ online: false }));
@@ -49,6 +67,12 @@ export class Store {
   }
 
   clearError() { this._setStatus({ error: null }); }
+
+  // 서버의 최신 내용을 받은 상태인지(기기에 저장해 둔 사본만 보고 있거나 오프라인이면 false). 로컬 모드는 늘 true
+  isFresh(...cols) {
+    if (this.status.mode === 'local') return true;
+    return this.status.online && cols.every(c => this._fresh[c]);
+  }
 
   async init() {
     if (!hasConfig) {
@@ -87,6 +111,7 @@ export class Store {
     this._unsubs.forEach(u => u());
     this._unsubs = [];
     this._pending = {};
+    this._fresh = {};
     this.data = emptyData();
     if (!user) {
       this._setStatus({ phase: 'login', user: null, pending: false });
@@ -107,6 +132,7 @@ export class Store {
           this.data[c] = obj;
         }
         this._pending[c] = snap.metadata.hasPendingWrites;
+        this._fresh[c] = !snap.metadata.fromCache;
         this.status.pending = Object.values(this._pending).some(Boolean);
         if (seen.size === COLS.length && this.status.phase !== 'ready') {
           this._setStatus({ phase: 'ready' });
@@ -134,6 +160,29 @@ export class Store {
     if (!uid) return;
     this._emit('data');
     this.fb.setDoc(this.fb.doc(this.db, 'users', uid, col, id), { ...patch, updatedAt: next.updatedAt }, { merge: true })
+      .catch(e => this._setStatus({ error: '저장하지 못했습니다: ' + (e.code || e.message) }));
+  }
+
+  // 바뀐 항목만 저장(안쪽 객체까지 병합). 값 자리에 DELETE를 넣으면 그 항목을 지움.
+  // 여러 기기에서 같은 문서의 서로 다른 항목을 고쳐도 서로 덮어쓰지 않습니다.
+  patch(col, id, patch) {
+    const next = mergeDeep(this.data[col][id], { ...patch, updatedAt: Date.now() });
+    this.data[col] = { ...this.data[col], [id]: next };
+    if (this.status.mode === 'local') { this._saveLocal(); this._emit('data'); return; }
+    const uid = this.status.user?.uid;
+    if (!uid) return;
+    this._emit('data');
+    const fb = this.fb;
+    const conv = v => {
+      if (v === DELETE) return fb.deleteField();
+      if (isPlain(v)) {
+        const o = {};
+        for (const [k, x] of Object.entries(v)) if (x !== undefined) o[k] = conv(x);
+        return o;
+      }
+      return clean(v);
+    };
+    fb.setDoc(fb.doc(this.db, 'users', uid, col, id), conv({ ...patch, updatedAt: next.updatedAt }), { merge: true })
       .catch(e => this._setStatus({ error: '저장하지 못했습니다: ' + (e.code || e.message) }));
   }
 

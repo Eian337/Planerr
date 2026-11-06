@@ -1,5 +1,6 @@
 // 학업 플래너 — 화면과 동작
 import { Store } from './store.js';
+import { tasksOf, taskPatch, isTask } from './tasks.js';
 import { applyTheme, cachedTheme, cacheTheme, fillTheme, PRESETS, COLOR_DEFS, COLOR_KEYS, rgb } from './theme.js';
 import { Player, cacheGet, cachePut, cacheDelete, cacheIds, legacyTracks, legacyClear } from './music.js';
 import { ensureFolder, uploadFile, downloadFile, deleteFile } from './drive.js';
@@ -9,7 +10,7 @@ import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timeta
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.11.0';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -58,6 +59,7 @@ const ui = {
   tlOpen: null,
   checklist: null,
   themeDraft: null,
+  restore: null,     // 백업에서 되살리기: 비교 결과
   timerTab: (() => { try { return localStorage.getItem('planner.timertab.v1') === 'alarm' ? 'alarm' : 'study'; } catch { return 'study'; } })(),
 };
 
@@ -1197,17 +1199,13 @@ function linkOptions(r, projects) {
   return html;
 }
 
-/* ───────── 하루 과제 목록 (배열 순서 = 우선순위) ───────── */
-// 예전 버전(하루 과제 하나)으로 저장된 기록은 1순위 과제 하나로 읽어 옴.
-// 예전의 '첫 행동'(action)은 '뭘 할지' 메모(memo)로 읽음
-function getTasks(s) {
-  const r = dayRec(s);
-  if (Array.isArray(r.tasks)) return r.tasks.map(t => (t.memo === undefined && t.action ? { ...t, memo: t.action } : t));
-  if (r.task) return [{ id: 'legacy', text: r.task, memo: r.action || '', cue: r.cue || '', done: !!r.done, projectId: r.projectId || null, milestoneId: r.milestoneId || null }];
-  return [];
-}
+/* ───────── 하루 과제 목록 (목록 순서 = 우선순위, 저장 형식은 tasks.js) ───────── */
+const getTasks = s => tasksOf(dayRec(s));
 const topTask = s => getTasks(s).find(t => !t.done) || null;
-const setTasks = (s, tasks) => store.set('days', s, { tasks });
+function setTasks(s, list) {
+  const p = taskPatch(dayRec(s), list);
+  if (p) store.patch('days', s, p);
+}
 const updateTask = (s, id, patch) => setTasks(s, getTasks(s).map(t => (t.id === id ? { ...t, ...patch } : t)));
 const carryTarget = s => (s < todayStr() ? todayStr() : addDays(s, 1));
 const carryLabel = s => (s < todayStr() ? '오늘로 가져오기' : s === todayStr() ? '내일로 넘기기' : '다음 날로 넘기기');
@@ -1216,6 +1214,9 @@ const carryLabel = s => (s < todayStr() ? '오늘로 가져오기' : s === today
 // 처음 실행할 때는 어제만, 그 뒤로는 마지막 실행일부터 어제까지(최대 14일) 확인
 function autoCarry() {
   if (store.status.phase !== 'ready' || settings().autoCarry === false) return;
+  // 기기에 저장해 둔 사본만 보고 옮기면 다른 기기에서 고친 내용을 예전 것으로 덮을 수 있어서,
+  // 서버의 최신 내용을 받은 뒤에만 옮김(오프라인이면 연결될 때까지 미룸)
+  if (!store.isFresh('days', 'meta')) return;
   const t = todayStr(), last = store.data.meta.rollover?.last;
   if (last && last >= t) return;
   store.set('meta', 'rollover', { last: t }); // 먼저 표시해 두어 다시 들어오지 않게 함
@@ -1229,9 +1230,10 @@ function autoCarry() {
     moved.push(...src.filter(x => !x.done).map(x => ({ ...x, from: x.from || d, start: '', end: '' })));
     setTasks(d, src.filter(x => x.done));
   }
-  const dest = getTasks(t), ids = new Set(dest.map(x => x.id));
-  setTasks(t, [...dest, ...moved.map(x => (ids.has(x.id) ? { ...x, id: uid() } : x))]);
-  toast(`못 끝낸 과제 ${moved.length}개를 오늘로 옮겼습니다.`);
+  // 이미 오늘 목록에 같은 과제가 있으면(다른 기기가 먼저 옮김) 다시 넣지 않음
+  const dest = getTasks(t), ids = new Set(dest.map(x => x.id)), add = moved.filter(x => !ids.has(x.id));
+  setTasks(t, [...dest, ...add]);
+  if (add.length) toast(`못 끝낸 과제 ${add.length}개를 오늘로 옮겼습니다.`);
 }
 
 function carryTasks(date, ids) {
@@ -1986,8 +1988,10 @@ function viewSettings() {
       <div class="card-head"><h2>데이터</h2></div>
       <div class="btn-row wrap tight">
         <button class="btn" data-action="export">백업 파일 내보내기</button>
+        <label class="btn file-btn">백업에서 되살리기<input type="file" id="restore-file" accept=".json,application/json" hidden></label>
         ${hasLocal ? `<button class="btn" data-action="import-local">이 기기의 로컬 기록 가져오기</button>` : ''}
       </div>
+      ${restoreBox()}
     </article>
     <p class="muted small center">학업 플래너 v${APP_VERSION}</p>
   </section>`;
@@ -2108,6 +2112,101 @@ function updateBadge() {
 }
 
 let toastTimer = 0;
+/* ───────── 백업에서 되살리기 ─────────
+   백업 파일과 지금 기록을 과제별로 비교해서, 지금 비어 있는 항목('뭘 할지', 단계, 마감일 등)만 채우고
+   지금 어디에도 없는 과제는 백업의 날짜에 다시 넣음. 지금 있는 내용은 지우거나 바꾸지 않음 */
+const RESTORE_FIELDS = [
+  ['memo', '뭘 할지'], ['cue', '시작 시점'], ['steps', '단계'], ['due', '마감일'], ['alarm', '알림 시각'],
+  ['start', '할 시간'], ['end', '할 시간'], ['projectId', '장기 과제 연결'], ['milestoneId', '장기 과제 단계'], ['from', '넘어온 날짜'], ['done', '완료 표시'],
+];
+const DATE_FIELDS = new Set(['alarm', 'start', 'end']); // 그날에만 의미 있는 항목: 과제가 다른 날로 옮겨졌으면 채우지 않음
+const blank = v => v === undefined || v === null || v === '' || v === false || (Array.isArray(v) && !v.length);
+
+function restorePlan(bdays) {
+  const where = new Map();
+  for (const [d, r] of Object.entries(store.data.days)) for (const t of tasksOf(r)) where.set(t.id, d);
+  const items = [];
+  for (const [d, r] of Object.entries(bdays || {}).sort(([a], [b]) => (a < b ? -1 : 1))) {
+    tasksOf(r).forEach((bt, idx) => {
+      const cd = where.get(bt.id);
+      if (!cd) {
+        items.push({ key: `${d}|${bt.id}`, kind: 'add', date: d, id: bt.id, text: bt.text, task: bt, idx, on: true });
+        return;
+      }
+      const ct = getTasks(cd).find(t => t.id === bt.id);
+      const fill = {}, labels = [];
+      for (const [f, label] of RESTORE_FIELDS) {
+        if (DATE_FIELDS.has(f) && cd !== d) continue;
+        if (f === 'steps') {
+          const cs = Array.isArray(ct.steps) ? ct.steps : [], bs = Array.isArray(bt.steps) ? bt.steps : [];
+          const have = new Set(cs.map(x => x.id)), miss = bs.filter(x => x && !have.has(x.id));
+          if (miss.length) { fill.steps = [...cs, ...miss]; labels.push(`단계 ${miss.length}개`); }
+          continue;
+        }
+        if (blank(ct[f]) && !blank(bt[f])) { fill[f] = bt[f]; if (!labels.includes(label)) labels.push(label); }
+      }
+      if (labels.length) items.push({ key: `${cd}|${bt.id}`, kind: 'fill', date: cd, from: d, id: bt.id, text: ct.text, fill, labels, on: true });
+    });
+  }
+  return items;
+}
+
+function restoreLoad(file) {
+  const rd = new FileReader();
+  rd.onload = () => {
+    let j = null;
+    try { j = JSON.parse(rd.result); } catch { /* 아래에서 안내 */ }
+    const data = j && j.app === 'study-planner' ? j.data : null;
+    if (!data || typeof data.days !== 'object') { toast('학업 플래너 백업 파일이 아닙니다.'); return; }
+    ui.restore = { name: file.name, at: j.exportedAt || '', version: j.version || '', items: restorePlan(data.days) };
+    render();
+  };
+  rd.onerror = () => toast('파일을 읽지 못했습니다.');
+  rd.readAsText(file);
+}
+
+function restoreApply() {
+  const R = ui.restore;
+  if (!R) return;
+  const pick = R.items.filter(it => it.on);
+  if (!pick.length) { toast('되살릴 항목을 골라 주세요.'); return; }
+  const byDate = new Map();
+  for (const it of pick) { if (!byDate.has(it.date)) byDate.set(it.date, []); byDate.get(it.date).push(it); }
+  for (const [d, its] of byDate) {
+    let list = getTasks(d);
+    for (const it of its.filter(x => x.kind === 'fill')) list = list.map(t => (t.id === it.id ? { ...t, ...it.fill } : t));
+    for (const it of its.filter(x => x.kind === 'add').sort((a, b) => a.idx - b.idx)) {
+      if (list.some(t => t.id === it.id)) continue;
+      list.splice(Math.min(it.idx, list.length), 0, { ...it.task });
+    }
+    setTasks(d, list);
+  }
+  ui.restore = null;
+  render();
+  toast(`${pick.length}개 과제를 백업에서 되살렸습니다.`);
+}
+
+function restoreBox() {
+  const R = ui.restore;
+  if (!R) return '';
+  const when = R.at ? (() => { const t = new Date(R.at); return Number.isNaN(+t) ? '' : `${fmtMDW(ymd(t))} ${pad(t.getHours())}:${pad(t.getMinutes())}에 만든 `; })() : '';
+  if (!R.items.length) {
+    return `<div class="restore"><p class="small">${esc(when)}백업과 비교해 봤는데, 지금 기록에 빠진 내용이 없습니다.</p>
+      <div class="btn-row"><button class="btn" data-action="restore-cancel">닫기</button></div></div>`;
+  }
+  const groups = new Map();
+  for (const it of R.items) { if (!groups.has(it.date)) groups.set(it.date, []); groups.get(it.date).push(it); }
+  const n = R.items.filter(it => it.on).length;
+  return `<div class="restore">
+    <p class="small">${esc(when)}백업과 비교한 결과입니다. 지금 비어 있는 항목만 채우고 없어진 과제는 다시 넣으며, 지금 있는 내용은 지우거나 바꾸지 않습니다. 되살리지 않을 것은 체크를 빼 주세요.</p>
+    ${[...groups].sort(([a], [b]) => (a < b ? -1 : 1)).map(([d, list]) => `<div class="rs-day"><b>${fmtMDW(d)}</b>
+      ${list.map(it => `<label class="check rs-item"><input type="checkbox" data-change="restore-pick" data-k="${esc(it.key)}" ${it.on ? 'checked' : ''}><span>${esc(it.text)}
+        <small class="muted">${it.kind === 'add' ? '— 없어진 과제, 다시 넣기' : `— ${esc(it.labels.join(', '))} 되살리기${it.from !== it.date ? ` (백업에서는 ${fmtMD(it.from)})` : ''}`}</small></span></label>`).join('')}
+    </div>`).join('')}
+    <div class="btn-row"><button class="btn primary" data-action="restore-apply" ${n ? '' : 'disabled'}>선택한 ${n}개 되살리기</button><button class="btn" data-action="restore-cancel">취소</button></div>
+  </div>`;
+}
+
 function toast(msg) {
   $toast.textContent = msg;
   $toast.classList.add('show');
@@ -2248,6 +2347,8 @@ const actions = {
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   },
+  'restore-apply'() { restoreApply(); },
+  'restore-cancel'() { ui.restore = null; render(); },
   'import-local'() {
     const n = store.importData(store.localBackup());
     toast(n ? `${n}개 항목을 가져왔습니다.` : '가져올 새 항목이 없습니다.');
@@ -2434,6 +2535,10 @@ const actions = {
 };
 
 const changeActions = {
+  'restore-pick'(el) {
+    const it = ui.restore?.items.find(x => x.key === el.dataset.k);
+    if (it) { it.on = el.checked; render(); }
+  },
   tfield(el) {
     const { date, id } = el.dataset, f = el.dataset.tfield, v = el.value.trim();
     const t = getTasks(date).find(x => x.id === id);
@@ -2576,6 +2681,7 @@ $app.addEventListener('click', e => {
 $app.addEventListener('change', e => {
   const el = e.target;
   if (el.id === 'pl-file') { if (el.files?.length) addFilesToPl(el.dataset.pl, [...el.files]); el.value = ''; return; }
+  if (el.id === 'restore-file') { if (el.files?.[0]) restoreLoad(el.files[0]); el.value = ''; return; }
   if (el.dataset.routine) {
     const R = routineCopy(), f = el.dataset.routine, v = el.value.trim();
     if (f === 'dayStart' || f === 'dayEnd') {
