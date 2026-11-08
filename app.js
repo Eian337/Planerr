@@ -1,6 +1,6 @@
 // 학업 플래너 — 화면과 동작
 import { Store } from './store.js';
-import { tasksOf, taskPatch, isTask } from './tasks.js';
+import { tasksOf, taskPatch, isTask, listOfMap, mapPatch } from './tasks.js';
 import { applyTheme, cachedTheme, cacheTheme, fillTheme, PRESETS, COLOR_DEFS, COLOR_KEYS, rgb } from './theme.js';
 import { Player, cacheGet, cachePut, cacheDelete, cacheIds, legacyTracks, legacyClear } from './music.js';
 import { ensureFolder, uploadFile, downloadFile, deleteFile } from './drive.js';
@@ -10,7 +10,7 @@ import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timeta
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.12.0';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -60,6 +60,7 @@ const ui = {
   checklist: null,
   themeDraft: null,
   restore: null,     // 백업에서 되살리기: 비교 결과
+  pinView: null,     // 오늘 화면에서 상시 과제칸을 보여 주는 중이면 { until }
   timerTab: (() => { try { return localStorage.getItem('planner.timertab.v1') === 'alarm' ? 'alarm' : 'study'; } catch { return 'study'; } })(),
 };
 
@@ -164,6 +165,7 @@ function tick() {
   else updateMainTimerDom();
   if (atRunning() && atRemain() <= 0) atFinish();
   else updateAlarmTimerDom();
+  pinTick();
   if (study.playing && !studyActive()) study.pause();
   if (timer && timer.phase === 'warm' && elapsed() >= timer.warmMs) {
     timer.accMs = timer.warmMs; timer.segStart = null; timer.phase = 'prompt';
@@ -1011,6 +1013,11 @@ function pipBuild() {
     .pills{display:flex;gap:6px;margin-top:8px}
     .pill{flex:1;border:1px solid ${c.line};background:${c.s2};color:${c.text};border-radius:9px;padding:7px 6px;cursor:pointer;font:700 12px -apple-system,"Noto Sans KR",system-ui,sans-serif}
     .pill.main{background:${c.accent};border-color:${c.accent};color:${c.ink}}
+    .hr{display:flex;align-items:center;gap:8px}
+    .pinb{border:1px solid ${c.line};background:${c.s2};color:${c.text};border-radius:99px;padding:2px 8px;font:700 11px -apple-system,"Noto Sans KR",system-ui,sans-serif;cursor:pointer;font-variant-numeric:tabular-nums}
+    .pinb.on{background:${c.accent};border-color:${c.accent};color:${c.ink}}
+    .pbar{height:3px;background:${c.s2}} .pbar i{display:block;height:100%;background:${c.accent};transition:width .25s linear}
+    .ph{font-size:11px;color:${c.muted};padding:2px 6px 6px}
   </style>`;
 
   const rows = tasks.map(t => {
@@ -1045,11 +1052,23 @@ function pipBuild() {
   if (atm.alarm) atHtml = `<div class="tm alarm compact trow"><b>⏰ 알람 타이머 종료</b><span class="tbtns"><button class="pill main" id="paOk">확인</button></span></div>`;
   else if (atm.status === 'running' || atm.status === 'paused') atHtml = `<div class="tm compact trow"><span class="tlabel">알람</span><span class="tnum" id="pat">${fmtClock(atRemain())}</span><span class="tbtns"><button class="rb" id="paMain" title="${atRunning() ? '일시정지' : '시작'}">${atRunning() ? ICON_PAUSE : ICON_PLAY}</button></span></div>`;
 
-  d.body.innerHTML = `<header><span class="ttl">오늘의 미션</span><span class="cnt">${tasks.length ? `${doneN}/${tasks.length} 완료` : fmtMDW(today)}</span></header>
-    <div class="list" id="plist">${tasks.length ? `<ol>${rows}</ol>` : '<p class="empty">오늘 과제가 없습니다. 플래너에서 추가하면 여기에 표시됩니다.</p>'}${proj ? `<div class="proj">${proj}</div>` : ''}</div>
+  // 상시 과제칸: 머리글의 📌를 누르면 잠깐 과제 목록 대신 보여 주고, 시간이 지나면 과제 목록으로 돌아감
+  const pins = getPins(), pinsOn = !!pipPinUntil && pins.length;
+  const pinRows = pins.map(p => `<li><button class="q pq ${pinChecked(p) ? 'done' : ''}" data-pin="${p.id}" title="${pinChecked(p) ? '체크 취소' : '오늘 확인'}"><span class="box">${pinChecked(p) ? '✓' : ''}</span><span class="qt">${esc(p.text)}</span></button></li>`).join('');
+  const pinBtn = pins.length ? `<button class="pinb ${pinsOn ? 'on' : ''}" id="pPin" title="${pinsOn ? '과제 목록으로' : '상시 과제 보기'}">📌 ${pins.filter(pinChecked).length}/${pins.length}</button>` : '';
+  d.body.innerHTML = `<header><span class="ttl">${pinsOn ? '상시 과제' : '오늘의 미션'}</span><span class="hr">${pinsOn ? '' : `<span class="cnt">${tasks.length ? `${doneN}/${tasks.length} 완료` : fmtMDW(today)}</span>`}${pinBtn}</span></header>
+    ${pinsOn ? `<div class="pbar"><i id="ppbar" style="width:${Math.max(0, (pipPinUntil - Date.now()) / PIN_SHOW_MS * 100).toFixed(1)}%"></i></div>` : ''}
+    <div class="list" id="plist">${pinsOn ? `<ol>${pinRows}</ol><p class="ph">체크는 오늘 하루만 · 잠시 뒤 과제 목록으로 돌아갑니다</p>` : `${tasks.length ? `<ol>${rows}</ol>` : '<p class="empty">오늘 과제가 없습니다. 플래너에서 추가하면 여기에 표시됩니다.</p>'}${proj ? `<div class="proj">${proj}</div>` : ''}`}</div>
     ${atHtml}${timerHtml}`;
-  d.getElementById('plist').scrollTop = scroll;
-  d.querySelectorAll('.q').forEach(b => {
+  if (!pinsOn) d.getElementById('plist').scrollTop = scroll;
+  d.querySelectorAll('.pq').forEach(b => {
+    b.onclick = () => {
+      setPins(getPins().map(p => (p.id === b.dataset.pin ? { ...p, doneOn: pinChecked(p) ? '' : todayStr() } : p)));
+      pipPinUntil = Date.now() + PIN_SHOW_MS;
+      pipRefresh();
+    };
+  });
+  d.querySelectorAll('.q:not(.pq)').forEach(b => {
     b.onclick = () => {
       const t = getTasks(todayStr()).find(x => x.id === b.dataset.id);
       if (t) updateTask(todayStr(), t.id, { done: !t.done });
@@ -1063,6 +1082,7 @@ function pipBuild() {
   on('pNo', () => mtDismiss(false));
   on('paMain', () => atToggle());
   on('paOk', () => atDismiss());
+  on('pPin', () => { pipPinUntil = pipPinUntil ? 0 : Date.now() + PIN_SHOW_MS; pipRefresh(); });
 }
 const pipRefresh = () => { if (pipWin) pipBuild(); };
 function pipUpdate(txt, ratio) {
@@ -1332,6 +1352,74 @@ function taskBlock(date) {
     ${tasks.length ? '' : `<p class="muted small">우선순위 순서대로 추가하세요. 맨 위의 끝나지 않은 과제가 '지금 할 과제'가 됩니다.</p>`}`;
 }
 
+/* ───────── 상시 과제칸 ─────────
+   날짜·마감과 상관없이 늘 명심할 것. 저장: meta/pins.items = { id: { text, o(순서), doneOn(체크한 날) } }
+   체크는 그날만 유효해서 다음 날이면 저절로 빈칸이 됨. 과제처럼 항목별로 저장해 기기끼리 덮어쓰지 않음.
+   오늘 화면과 미션 창에서는 누르면 잠깐 과제 목록 대신 보여 주고, 손대지 않은 채 시간이 지나면 과제 목록으로 돌아감 */
+const PIN_SHOW_MS = 15000;
+const getPins = () => listOfMap(store.data.meta.pins?.items);
+function setPins(list) {
+  const tm = mapPatch(store.data.meta.pins?.items, list);
+  if (tm) store.patch('meta', 'pins', { items: tm });
+}
+const pinChecked = p => p.doneOn === todayStr();
+const pinCount = () => { const ps = getPins(); return { n: ps.length, done: ps.filter(pinChecked).length }; };
+let pipPinUntil = 0; // 미션 창에서 상시 과제를 보여 주는 중이면 끝나는 시각
+
+function pinShow() { ui.pinView = { until: Date.now() + PIN_SHOW_MS }; render(); }
+function pinHide() { ui.pinView = null; render(); }
+// 상시 과제를 만지는 동안에는 돌아가는 시간을 다시 채움
+const pinTouch = () => { if (ui.pinView) ui.pinView.until = Date.now() + PIN_SHOW_MS; };
+// 적다 만 내용이 있으면 돌아가지 않음(돌아가면 입력하던 글이 사라지므로)
+function pinDirty() {
+  if (document.getElementById('pin-new')?.value.trim()) return true;
+  const a = document.activeElement;
+  return !!(a?.classList?.contains('pin-in') && a.value !== (getPins().find(p => p.id === a.dataset.id)?.text ?? a.value));
+}
+function pinTick() {
+  const now = Date.now();
+  if (ui.pinView) {
+    if (drag || pinDirty()) pinTouch();
+    if (ui.pinView.until <= now) { ui.pinView = null; scheduleRender(); }
+    else {
+      const b = document.getElementById('pin-bar');
+      if (b) b.style.width = `${Math.max(0, (ui.pinView.until - now) / PIN_SHOW_MS * 100).toFixed(1)}%`;
+    }
+  }
+  if (pipPinUntil) {
+    if (pipPinUntil <= now) { pipPinUntil = 0; pipRefresh(); }
+    else {
+      const b = pipWin?.document.getElementById('ppbar');
+      if (b) b.style.width = `${Math.max(0, (pipPinUntil - now) / PIN_SHOW_MS * 100).toFixed(1)}%`;
+    }
+  }
+}
+
+function pinChip() {
+  const { n, done } = pinCount();
+  return `<button class="chip-btn pin-chip ${ui.pinView ? 'on' : ''}" data-action="pin-toggle" aria-pressed="${!!ui.pinView}" title="상시 과제칸">📌 상시${n ? ` <span class="pin-cnt">${done}/${n}</span>` : ''}</button>`;
+}
+
+function pinPanel() {
+  const ps = getPins(), left = ui.pinView ? Math.max(0, (ui.pinView.until - Date.now()) / PIN_SHOW_MS * 100) : 0;
+  const rows = ps.map(p => `<li class="pin-row ${pinChecked(p) ? 'done' : ''}" data-sort-id="${p.id}">
+      <button class="drag-handle" type="button" aria-label="끌어서 순서 바꾸기">${GRIP}</button>
+      <input type="checkbox" data-change="pin-check" data-id="${p.id}" ${pinChecked(p) ? 'checked' : ''} aria-label="오늘 확인">
+      <input class="pin-in" data-change="pin-text" data-id="${p.id}" data-key="pin|${p.id}" value="${esc(p.text)}" maxlength="120" autocomplete="off" aria-label="상시 과제 내용">
+      <button class="icon-btn sm" data-action="pin-del" data-id="${p.id}" aria-label="삭제">×</button>
+    </li>`).join('');
+  return `<div class="pins">
+    <div class="pins-head"><b>📌 상시 과제</b><span class="muted small">체크는 오늘 하루만 · 내일이면 다시 빈칸</span></div>
+    <div class="pin-timer" aria-hidden="true"><i id="pin-bar" style="width:${left.toFixed(1)}%"></i></div>
+    ${ps.length ? `<ol class="pin-list" data-sortable="pins">${rows}</ol>` : '<p class="muted small">마감과 상관없이 늘 명심하거나 떠올려야 할 것을 적어 두세요. 예: 폰은 가방에 넣고 시작하기</p>'}
+    <div class="add-row">
+      <input id="pin-new" data-enter="pin-add" placeholder="늘 명심할 것 추가" maxlength="120" autocomplete="off" aria-label="상시 과제 추가">
+      <button class="btn primary" data-action="pin-add">추가</button>
+    </div>
+    <div class="btn-row"><button class="btn sm" data-action="pin-toggle">과제 목록으로</button><span class="muted small">손대지 않으면 ${PIN_SHOW_MS / 1000}초 뒤 과제 목록으로 돌아갑니다</span></div>
+  </div>`;
+}
+
 /* ───────── 과제 세분화·넘어온 과제·할 시간 ───────── */
 const stepsOf = t => (Array.isArray(t.steps) ? t.steps : []);
 function updateSteps(date, id, fn) {
@@ -1545,8 +1633,8 @@ function viewDay() {
       <div class="${st.todayDone ? 'ok' : ''}"><b>${st.todayDone ? '✓' : '–'}</b><span>오늘 시작</span></div>
     </div>
     <article class="card">
-      <div class="card-head"><h2>${isToday ? '오늘의 과제' : '이 날의 과제'}</h2><span class="head-right">${r.focusMin ? `<span class="muted small">집중 ${r.focusMin}분</span>` : ''}${isToday && 'documentPictureInPicture' in window ? `<button class="chip-btn ${pipWin ? 'on' : ''}" data-action="mt-pip">${pipWin ? '미션 창 닫기' : '미션 창'}</button>` : ''}<span class="pill ${r.started ? 'on' : ''}">${r.started ? '시작함' : '시작 전'}</span></span></div>
-      ${taskBlock(s)}
+      <div class="card-head"><h2>${isToday ? (ui.pinView ? '상시 과제칸' : '오늘의 과제') : '이 날의 과제'}</h2><span class="head-right">${isToday ? pinChip() : ''}${r.focusMin ? `<span class="muted small">집중 ${r.focusMin}분</span>` : ''}${isToday && 'documentPictureInPicture' in window ? `<button class="chip-btn ${pipWin ? 'on' : ''}" data-action="mt-pip">${pipWin ? '미션 창 닫기' : '미션 창'}</button>` : ''}<span class="pill ${r.started ? 'on' : ''}">${r.started ? '시작함' : '시작 전'}</span></span></div>
+      ${isToday && ui.pinView ? pinPanel() : taskBlock(s)}
     </article>
     ${isToday
       ? timerCard(r)
@@ -2347,6 +2435,16 @@ const actions = {
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   },
+  'pin-toggle'() { if (ui.pinView) pinHide(); else pinShow(); },
+  'pin-add'() {
+    const inp = document.getElementById('pin-new'), text = inp?.value.trim();
+    if (!text) { inp?.focus(); return; }
+    setPins([...getPins(), { id: uid(), text }]);
+    pinTouch();
+    render();
+    document.getElementById('pin-new')?.focus();
+  },
+  'pin-del'(el) { setPins(getPins().filter(p => p.id !== el.dataset.id)); pinTouch(); render(); },
   'restore-apply'() { restoreApply(); },
   'restore-cancel'() { ui.restore = null; render(); },
   'import-local'() {
@@ -2535,6 +2633,16 @@ const actions = {
 };
 
 const changeActions = {
+  'pin-check'(el) {
+    setPins(getPins().map(p => (p.id === el.dataset.id ? { ...p, doneOn: el.checked ? todayStr() : '' } : p)));
+    pinTouch(); render(); pipRefresh();
+  },
+  'pin-text'(el) {
+    const v = el.value.trim();
+    if (!v) { render(); return; } // 빈칸으로 만들면 원래대로(지우려면 ×)
+    setPins(getPins().map(p => (p.id === el.dataset.id ? { ...p, text: v } : p)));
+    pinTouch(); pipRefresh();
+  },
   'restore-pick'(el) {
     const it = ui.restore?.items.find(x => x.key === el.dataset.k);
     if (it) { it.on = el.checked; render(); }
@@ -2584,6 +2692,9 @@ function sortCommit(list, ids) {
   if (list.dataset.sortable === 'tasks') {
     const date = list.dataset.date, cur = getTasks(date);
     setTasks(date, ids.map(id => cur.find(t => t.id === id)).filter(Boolean));
+  } else if (list.dataset.sortable === 'pins') {
+    const cur = getPins();
+    setPins(ids.map(id => cur.find(p => p.id === id)).filter(Boolean));
   } else if (list.dataset.sortable === 'pl') {
     saveMusic({ playlists: clonePls().map(p => (p.id === list.dataset.pl ? { ...p, items: ids } : p)) });
     refreshPlayers();
@@ -2672,6 +2783,8 @@ $app.addEventListener('pointerdown', e => {
   if (h && $app.contains(h)) dragStart(e, h);
 });
 
+$app.addEventListener('pointerdown', e => { if (e.target.closest?.('.pins')) pinTouch(); });
+$app.addEventListener('keydown', e => { if (e.target.closest?.('.pins')) pinTouch(); }, true);
 $app.addEventListener('click', e => {
   const el = e.target.closest('[data-action]');
   if (!el || !$app.contains(el)) return;

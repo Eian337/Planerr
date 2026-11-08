@@ -654,3 +654,24 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 .rs-day > b { font-size: 14px; }
 .rs-item { align-items: flex-start; }
 .rs-item small { display: block; margin-top: 2px; }
+
+/* ── 상시 과제칸 ── */
+.pin-chip { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.pin-cnt { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.pins { display: grid; gap: 10px; }
+.pins-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6px 10px; flex-wrap: wrap; }
+.pin-timer { height: 3px; border-radius: 9px; background: var(--surface-2); overflow: hidden; }
+.pin-timer i { display: block; height: 100%; background: var(--accent); transition: width .25s linear; }
+.pin-list { list-style: none; margin: 0; padding: 0; }
+.pin-row { display: grid; grid-template-columns: 22px 20px 1fr auto; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--line); }
+.pin-row:first-child { border-top: 0; }
+.pins input.pin-in { width: 100%; min-width: 0; border: 1px solid transparent; background: transparent; color: var(--text); font: inherit; font-size: 14.5px; padding: 6px 6px; border-radius: 8px; }
+.pins input.pin-in:hover { border-color: var(--line); }
+.pins input.pin-in:focus { border-color: var(--accent); background: var(--surface); outline: none; }
+.pins .pin-row.done input.pin-in { color: var(--muted); text-decoration: line-through; }
+.pins .btn-row { align-items: center; flex-wrap: wrap; gap: 8px; }
+/* 좁은 화면에서 카드 머리글 버튼이 많아지면 세로로 찌그러지지 않고 다음 줄로 */
+.card-head { flex-wrap: wrap; row-gap: 8px; }
+.card-head > h2 { white-space: nowrap; }
+.head-right { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
+.head-right > * { white-space: nowrap; }

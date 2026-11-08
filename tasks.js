@@ -16,29 +16,17 @@ export const sameVal = (a, b) => stable(a) === stable(b);
 // 빈 값('', 빈 배열, false, null)은 '없음'과 같게 봄 — 처음 저장할 때 빈 항목은 쓰지 않아 다른 기기의 값을 지우지 않음
 const isEmpty = v => v === undefined || v === null || v === '' || v === false || (Array.isArray(v) && !v.length);
 
-export function tasksOf(r) {
-  r = r || {};
-  if (r.tmap && typeof r.tmap === 'object') {
-    const list = Object.entries(r.tmap).filter(([, t]) => isTask(t)).map(([id, t]) => ({ ...t, id }))
-      .sort((a, b) => (a.o ?? 0) - (b.o ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-      .map(({ o, ...t }) => t);
-    // 아직 예전 버전인 기기가 배열로 저장한 과제는 뒤에 붙여 보여 줌(다음 저장 때 tmap으로 옮겨짐)
-    if (Array.isArray(r.tasks)) {
-      const ids = new Set(list.map(t => t.id));
-      list.push(...r.tasks.filter(t => isTask(t) && !ids.has(t.id)).map(legacyTask));
-    }
-    return list;
-  }
-  if (Array.isArray(r.tasks)) return r.tasks.filter(isTask).map(legacyTask);
-  if (r.task) return [{ id: 'legacy', text: r.task, memo: r.action || '', cue: r.cue || '', done: !!r.done, projectId: r.projectId || null, milestoneId: r.milestoneId || null }];
-  return [];
+// 순서 있는 맵({ id: { text, …, o } }) ↔ 목록. 과제 말고 상시 과제칸 같은 다른 목록에도 씀
+export function listOfMap(m) {
+  if (!m || typeof m !== 'object') return [];
+  return Object.entries(m).filter(([, t]) => isTask(t)).map(([id, t]) => ({ ...t, id }))
+    .sort((a, b) => (a.o ?? 0) - (b.o ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map(({ o, ...t }) => t);
 }
 
-// 하루 기록(r)을 새 목록(list)으로 바꾸려면 저장할 내용: 새 과제는 빈 항목을 뺀 전체, 고친 과제는 바뀐 항목만, 빠진 과제는 지움.
-// 바꿀 것이 없으면 null
-export function taskPatch(r, list) {
-  r = r || {};
-  const base = new Map(r.tmap && typeof r.tmap === 'object' ? Object.entries(r.tmap).filter(([, t]) => isTask(t)) : []);
+// 맵(m)을 새 목록(list)으로 바꾸려면 저장할 내용: 새 항목은 빈 값을 뺀 전체, 고친 항목은 바뀐 값만, 빠진 항목은 지움. 없으면 null
+export function mapPatch(m, list) {
+  const base = new Map(m && typeof m === 'object' ? Object.entries(m).filter(([, t]) => isTask(t)) : []);
   const tm = {}, keep = new Set();
   list.forEach((t, i) => {
     const nt = { ...t, o: i };
@@ -58,8 +46,32 @@ export function taskPatch(r, list) {
     if (Object.keys(d).length) tm[t.id] = d;
   });
   for (const id of base.keys()) if (!keep.has(id)) tm[id] = DELETE;
+  return Object.keys(tm).length ? tm : null;
+}
+
+export function tasksOf(r) {
+  r = r || {};
+  if (r.tmap && typeof r.tmap === 'object') {
+    const list = listOfMap(r.tmap);
+    // 아직 예전 버전인 기기가 배열로 저장한 과제는 뒤에 붙여 보여 줌(다음 저장 때 tmap으로 옮겨짐)
+    if (Array.isArray(r.tasks)) {
+      const ids = new Set(list.map(t => t.id));
+      list.push(...r.tasks.filter(t => isTask(t) && !ids.has(t.id)).map(legacyTask));
+    }
+    return list;
+  }
+  if (Array.isArray(r.tasks)) return r.tasks.filter(isTask).map(legacyTask);
+  if (r.task) return [{ id: 'legacy', text: r.task, memo: r.action || '', cue: r.cue || '', done: !!r.done, projectId: r.projectId || null, milestoneId: r.milestoneId || null }];
+  return [];
+}
+
+// 하루 기록(r)을 새 목록(list)으로 바꾸려면 저장할 내용: 새 과제는 빈 항목을 뺀 전체, 고친 과제는 바뀐 항목만, 빠진 과제는 지움.
+// 바꿀 것이 없으면 null
+export function taskPatch(r, list) {
+  r = r || {};
+  const tm = mapPatch(r.tmap, list);
   const patch = {};
-  if (Object.keys(tm).length) patch.tmap = tm;
+  if (tm) patch.tmap = tm;
   // 예전 형식은 tmap으로 옮겼으니 지움(남겨 두면 예전 과제가 다시 보일 수 있음)
   if (Array.isArray(r.tasks)) patch.tasks = DELETE;
   if (r.task !== undefined) patch.task = DELETE;
