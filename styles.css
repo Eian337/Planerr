@@ -73,8 +73,8 @@ h1 { font-size: 21px; margin: 0; letter-spacing: -.02em; line-height: 1.3; }
 .layout { min-height: 100dvh; }
 .topbar {
   position: sticky; top: 0; z-index: 20;
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px;
+  padding: calc(10px + env(safe-area-inset-top)) 16px 0;
   background: var(--bg);
   border-bottom: 1px solid var(--line);
 }
@@ -95,33 +95,32 @@ h1 { font-size: 21px; margin: 0; letter-spacing: -.02em; line-height: 1.3; }
   font-variant-numeric: tabular-nums;
 }
 
+.brand { order: 1; }
+.top-right { order: 2; }
+/* 탭: 좁은 화면에서는 상단 막대의 둘째 줄 전체, 넓은 화면(1000px 이상)에서는 이름과 오른쪽 버튼 사이 한 줄 */
 .tabs {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
-  display: grid; grid-template-columns: repeat(6, 1fr);
-  background: var(--surface); border-top: 1px solid var(--line);
-  padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+  order: 3; flex: 1 0 100%;
+  display: flex; justify-content: space-between; gap: 2px;
+  margin: 0 -8px; padding: 2px 0 6px;
 }
 .tab {
-  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  flex: 1 1 auto; display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 6px;
   border: 0; background: none; color: var(--muted);
-  font-size: 11.5px; padding: 6px 0; border-radius: 10px;
+  font-size: 14px; padding: 7px 4px; border-radius: 10px; white-space: nowrap;
 }
-.tab svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.tab.active { color: var(--accent); font-weight: 700; }
-
-.main { max-width: 720px; margin: 0 auto; padding: 16px 16px calc(96px + env(safe-area-inset-bottom)); }
-
-@media (min-width: 760px) {
-  .tabs {
-    position: static; display: flex; justify-content: center; gap: 4px;
-    border-top: 0; border-bottom: 1px solid var(--line); background: var(--bg);
-    padding: 8px 16px;
-  }
-  .tab { flex-direction: row; gap: 8px; font-size: 14.5px; padding: 8px 14px; }
-  .tab svg { width: 18px; height: 18px; }
-  .tab.active { background: var(--accent-soft); }
-  .main { padding-top: 24px; padding-bottom: 56px; }
+.tab svg { width: 17px; height: 17px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.tab.active { color: var(--accent); font-weight: 700; background: var(--accent-soft); }
+/* 휴대폰: 글자만(여섯 개가 한 줄에 들어가도록) */
+@media (max-width: 599px) { .tab svg { display: none; } .tab { font-size: 13.5px; padding: 7px 2px; } }
+@media (min-width: 760px) { .tabs { justify-content: center; gap: 4px; } .tab { flex: 0 0 auto; padding: 8px 14px; font-size: 14.5px; } }
+@media (min-width: 1000px) {
+  .topbar { flex-wrap: nowrap; padding-bottom: 8px; }
+  .tabs { order: 2; flex: 1 1 auto; margin: 0; padding: 0; }
+  .top-right { order: 3; }
 }
+
+.main { max-width: 720px; margin: 0 auto; padding: 16px 16px calc(40px + env(safe-area-inset-bottom)); }
+@media (min-width: 760px) { .main { padding-top: 24px; padding-bottom: 56px; } }
 
 .banner {
   max-width: 688px; margin: 12px auto 0; padding: 10px 14px; border-radius: 12px;
@@ -334,7 +333,7 @@ input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); m
 .auth-msg.ok { color: var(--muted); }
 
 #toast {
-  position: fixed; left: 50%; bottom: calc(96px + env(safe-area-inset-bottom));
+  position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom));
   transform: translate(-50%, 16px); background: var(--text); color: var(--bg);
   padding: 10px 16px; border-radius: 12px; font-size: 14px; opacity: 0; pointer-events: none;
   transition: opacity .2s, transform .2s; z-index: 50; max-width: calc(100% - 32px); text-align: center;
@@ -707,23 +706,13 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 .area-ed .sub-chip input.sub-in { width: 7.5em; border: 0; background: transparent; font: inherit; font-size: 13.5px; padding: 4px 0; color: var(--text); }
 .area-ed .add-row.sm { margin-top: 0; }
 
-/* ── 넓은 화면(가로 1000px 이상): 왼쪽 메뉴 + 두 칸 ── */
+/* ── 넓은 화면(가로 1000px 이상): 두 칸 ── */
 .proj-grid { display: flex; flex-direction: column; gap: 14px; }
 .cols { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 18px; align-items: start; }
 .col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 @media (min-width: 1000px) {
-  .layout { display: grid; grid-template-columns: 196px minmax(0, 1fr); grid-template-rows: auto auto 1fr; }
-  .topbar { grid-column: 1 / -1; grid-row: 1; }
-  .tabs {
-    grid-column: 1; grid-row: 2 / span 2; align-self: start;
-    position: sticky; top: 55px; max-height: calc(100dvh - 55px); overflow-y: auto;
-    display: flex; flex-direction: column; justify-content: flex-start; gap: 4px;
-    border: 0; border-right: 1px solid var(--line); background: var(--bg);
-    padding: 16px 12px; min-height: calc(100dvh - 55px);
-  }
-  .tab { width: 100%; justify-content: flex-start; font-size: 15px; padding: 10px 12px; }
-  .banner { grid-column: 2; grid-row: 2; max-width: none; margin: 12px 24px 0; }
-  .main, .main.wide { grid-column: 2; grid-row: 3; width: 100%; max-width: 1240px; margin: 0 auto; padding: 20px 24px 40px; }
+  .banner { max-width: 1192px; }
+  .main, .main.wide { width: 100%; max-width: 1240px; margin: 0 auto; padding: 20px 24px 40px; }
   .view.wide2 { gap: 16px; }
   .proj-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; align-items: start; }
   .timer-view .mt-card { padding-top: 24px; padding-bottom: 24px; }

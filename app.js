@@ -12,7 +12,7 @@ import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timeta
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.16.0';
+const APP_VERSION = '1.16.1';
 const BASE_TITLE = 'Planerr';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -2508,10 +2508,10 @@ function shell() {
     <header class="topbar">
       <span class="brand">Planerr</span>
       <span class="top-right">${timerMini()}${calChip()}${syncBadge()}<button class="icon-btn gear ${ui.view === 'settings' ? 'active' : ''}" data-action="nav" data-view="settings" aria-label="설정">${ICON.settings}</button></span>
+      <nav class="tabs" aria-label="화면 전환">
+        ${tabs.map(([v, label]) => `<button class="tab ${ui.view === v ? 'active' : ''}" data-action="nav" data-view="${v}" ${ui.view === v ? 'aria-current="page"' : ''}>${ICON[v]}<span>${label}</span></button>`).join('')}
+      </nav>
     </header>
-    <nav class="tabs" aria-label="화면 전환">
-      ${tabs.map(([v, label]) => `<button class="tab ${ui.view === v ? 'active' : ''}" data-action="nav" data-view="${v}" ${ui.view === v ? 'aria-current="page"' : ''}>${ICON[v]}<span>${label}</span></button>`).join('')}
-    </nav>
     ${s.error ? `<div class="banner" role="alert"><span>${esc(s.error)}</span><button class="link-btn" data-action="dismiss-error">닫기</button></div>` : ''}
     <main class="main ${ui.view === 'month' ? 'wide' : ''}">${views[ui.view]()}</main>
     ${alarmOverlay()}
@@ -3236,7 +3236,9 @@ function dragMove(e) {
 // 화면 위·아래 가장자리로 끌면 저절로 스크롤
 function autoScroll() {
   if (!drag) return;
-  const y = drag.lastClientY, top = 90, bottom = innerHeight - (innerWidth < 760 ? 110 : 50);
+  // 위쪽 고정 막대(탭 포함) 바로 아래와 화면 맨 아래 근처에서 자동으로 스크롤
+  const head = document.querySelector('.topbar')?.getBoundingClientRect().bottom || 0;
+  const y = drag.lastClientY, top = head + 36, bottom = innerHeight - 50;
   const v = y < top ? -Math.ceil((top - y) / 6) : y > bottom ? Math.ceil((y - bottom) / 6) : 0;
   if (v) { scrollBy(0, v); dragLayout(); }
   drag.raf = requestAnimationFrame(autoScroll);
