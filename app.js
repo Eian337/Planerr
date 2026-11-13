@@ -9,10 +9,11 @@ import { ensureFolder, uploadFile, downloadFile, deleteFile } from './drive.js';
 import * as CFG from './config.js';
 import { GCal, syncCalendar, eventSig, hexId, insertEvent, eventsPath, CAL_SCOPE, DRIVE_SCOPE } from './calendar.js';
 import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timetable.js';
+import { CUR_TEMPLATE, parseCurriculum } from './curriculum.js';
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.17.0';
+const APP_VERSION = '1.18.0';
 const BASE_TITLE = 'Planerr';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -46,6 +47,11 @@ const mmss = (ms, ceil = false) => {
 const ui = {
   areaFilter: (() => { try { return localStorage.getItem('planner.areaFilter.v1') || ''; } catch { return ''; } })(), // 걸러 볼 영역(''면 전체)
   view: 'day',
+  curId: null,       // 커리큘럼 탭에서 연 커리큘럼
+  curOpen: null,     // 펼쳐 고치는 중인 레슨 id
+  curDone: null,     // 끝냄 입력 중인 { cid, lid }
+  curNote: null,     // 과제로 끝낸 레슨에 한 줄 남기기 { cid, lid }
+  curNew: false, curPaste: false, curTpl: false, curShowArch: false,
   statMode: 'week',  // 기록 화면: 'week' | 'month'
   statAnchor: null,  // 기록 화면이 보여 주는 기간 안의 날짜(없으면 오늘)
   logArea: null,     // 직접 기록 칸에 미리 골라 둘 영역(반복 목표의 '기록'에서)
@@ -1297,6 +1303,7 @@ const ICON = {
   week: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="15" rx="2.5"/><path d="M3 10h18M8 3v4M16 3v4M7 14.5h10"/></svg>',
   month: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="15" rx="2.5"/><path d="M3 10h18M8 3v4M16 3v4M7.5 13.5h.01M12 13.5h.01M16.5 13.5h.01M7.5 17h.01M12 17h.01"/></svg>',
   projects: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4M5 4h11.5l-2.2 3.8 2.2 3.8H5"/></svg>',
+  curriculum: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18.5V5a2 2 0 0 1 2-2h12v14H7a2 2 0 0 0-2 2 2 2 0 0 0 2 2h12v-4"/><path d="M9 7.5h6M9 11h4"/></svg>',
   stats: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16M7 16.5v-5M12 16.5V6.5M17 16.5v-8"/></svg>',
   timer: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.8v3.9l2.4 1.8M9.5 2.8h5M12 2.8V6M18.3 6.8l1.4-1.4"/></svg>',
   settings: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
@@ -1381,7 +1388,11 @@ function setTasks(s, list) {
   const p = taskPatch(dayRec(s), list);
   if (p) store.patch('days', s, p);
 }
-const updateTask = (s, id, patch) => setTasks(s, getTasks(s).map(t => (t.id === id ? { ...t, ...patch } : t)));
+const updateTask = (s, id, patch) => {
+  const before = getTasks(s).find(t => t.id === id);
+  setTasks(s, getTasks(s).map(t => (t.id === id ? { ...t, ...patch } : t)));
+  if (before?.les && 'done' in patch && !!patch.done !== !!before.done) lessonByTask(s, before, !!patch.done);
+};
 const carryTarget = s => (s < todayStr() ? todayStr() : addDays(s, 1));
 const carryLabel = s => (s < todayStr() ? '오늘로 가져오기' : s === todayStr() ? '내일로 넘기기' : '다음 날로 넘기기');
 
@@ -1622,7 +1633,7 @@ function stuckBox(date, t) {
 
 function rowTags(date, t, isTop, editing) {
   const st = stepsOf(t), dn = st.filter(x => x.done).length;
-  return `${areaTag(t)}${dueTag(t)}`
+  return `${areaTag(t)}${t.les ? `<small class="cur-tag"> 📘 ${esc(curOf(t.cur)?.name || '커리큘럼')}</small>` : ''}${dueTag(t)}`
     + `${t.start && !t.done ? `<small class="tr-slot"> 🕒 ${esc(t.start)}${t.end ? `–${esc(t.end)}` : ''}</small>` : ''}`
     + `${t.alarm && !t.done ? `<small class="tr-alarm"> ⏰ ${esc(t.alarm)}</small>` : ''}`
     + `${st.length ? `<small class="muted"> · 단계 ${dn}/${st.length}</small>` : ''}`
@@ -1633,7 +1644,7 @@ function rowTags(date, t, isTop, editing) {
 /* ───────── 기록(활동 시간) ─────────
    저장: days/{날짜}.lmap = { id: { text(메모), area, min, src, at } }
    src: timer(집중 타이머) · start(시작 타이머) · manual(직접 기록) · check(반복 목표 '했음', 0분)
-        · routine(시간표의 활동 시간 '✓ 했음', rt = 반복 시간 id)
+        · routine(시간표의 활동 시간 '✓ 했음', rt = 반복 시간 id) · cur(커리큘럼 레슨 끝냄, cur·les = 커리큘럼·레슨 id)
    예전부터 쓰던 '집중 n분'(focusMin)은 타이머로 기록한 시간만 계속 더함.
    영역 정보가 없는 예전 집중 시간 = focusMin − (타이머 기록 합) → 통계에서는 학업으로 셈 */
 const getLogs = d => listOfMap(dayRec(d).lmap);
@@ -1644,7 +1655,7 @@ function setLogs(d, list) {
 function addLog(d, entry) { setLogs(d, [...getLogs(d), { id: uid(), text: '', at: Date.now(), ...entry }]); }
 const sumMin = list => list.reduce((a, l) => a + (Number(l.min) || 0), 0);
 const legacyMin = d => Math.max(0, (Number(dayRec(d).focusMin) || 0) - sumMin(getLogs(d).filter(l => l.src === 'timer' || l.src === 'start')));
-const SRC_LABEL = { timer: '집중 타이머', start: '시작 타이머', manual: '직접 기록', check: '했음', routine: '시간표' };
+const SRC_LABEL = { timer: '집중 타이머', start: '시작 타이머', manual: '직접 기록', check: '했음', routine: '시간표', cur: '커리큘럼' };
 const datesIn = (a, b) => { const out = []; for (let d = a; d <= b; d = addDays(d, 1)) out.push(d); return out; };
 // 기간 안의 기록 전체(예전 집중 시간은 학업 기록 한 줄로)
 function logsIn(a, b) {
@@ -1813,6 +1824,241 @@ function viewStats() {
   ], 'stats-view');
 }
 
+/* ───────── 커리큘럼 ─────────
+   저장: curricula/{id} (형식은 curriculum.js 머리 설명). 진도 중심: '다음 레슨'은 끝내지도 건너뛰지도 않은 첫 레슨.
+   레슨마다 날짜를 잡아 둘 수도 있지만(그날 오늘·주 화면에 보임) 지나도 밀려 쌓이지 않음 */
+const inVal = id => document.getElementById(id)?.value.trim() || '';
+const linkify = s => esc(s).replace(/https?:\/\/[^\s<]+/g, u => `<a href="${u}" target="_blank" rel="noopener">${u.length > 42 ? `${u.slice(0, 40)}…` : u}</a>`);
+const curList = () => Object.entries(store.data.curricula || {}).filter(([, c]) => c && typeof c.name === 'string')
+  .map(([id, c]) => ({ ...c, id })).sort((a, b) => (a.created || 0) - (b.created || 0) || (a.id < b.id ? -1 : 1));
+const curActive = () => curList().filter(c => !c.archived);
+const curOf = id => { const c = id && store.data.curricula?.[id]; return c && typeof c.name === 'string' ? { ...c, id } : null; };
+const lessonsOf = c => listOfMap(c?.lessons);
+function setLessons(cid, list) {
+  const tm = mapPatch(store.data.curricula?.[cid]?.lessons, list);
+  if (tm) store.patch('curricula', cid, { lessons: tm });
+}
+const updLesson = (cid, lid, patch) => setLessons(cid, lessonsOf(curOf(cid)).map(l => (l.id === lid ? { ...l, ...patch } : l)));
+const lessonLeft = l => !l.h && !l.done && !l.skip;
+const PACES = [[0, '정하지 않음'], [1, '주 1개'], [2, '주 2개'], [3, '주 3개'], [4, '주 4개'], [5, '주 5개'], [7, '주 7개 (하루 1개)'], [10, '주 10개'], [14, '주 14개 (하루 2개)']];
+const paceOptions = sel => PACES.map(([n, t]) => `<option value="${n}" ${Number(sel) === n ? 'selected' : ''}>${t}</option>`).join('');
+function curInfo(c) {
+  const all = lessonsOf(c), ls = all.filter(l => !l.h), t = todayStr(), ws = weekStart(t), we = addDays(ws, 6);
+  const done = ls.filter(l => l.done).length, skipped = ls.filter(l => !l.done && l.skip).length;
+  const left = ls.length - done - skipped, pace = Math.max(0, Math.min(14, Number(c.pace) || 0));
+  const week = ls.filter(l => l.done && l.done >= ws && l.done <= we).length;
+  const num = new Map(ls.map((l, i) => [l.id, i + 1])), secOf = new Map();
+  let sec = '';
+  for (const l of all) { if (l.h) sec = l.text; else secOf.set(l.id, sec); }
+  // 이 속도로 가면 끝나는 주의 마지막 날(이번 주에 남은 몫부터 채운다고 봄)
+  let eta = '';
+  if (pace && left) { const rest = left - Math.max(0, pace - week); eta = rest <= 0 ? we : addDays(we, Math.ceil(rest / pace) * 7); }
+  const base = ls.length - skipped;
+  return { all, ls, done, skipped, left, total: ls.length, base, pace, week, num, secOf, eta, next: ls.find(lessonLeft) || null, pct: base ? Math.round((done / base) * 100) : 0 };
+}
+const curTaskOf = (date, lid) => getTasks(date).find(t => t.les === lid);
+function lessonTask(cid, lid) {
+  const c = curOf(cid), l = c && lessonsOf(c).find(x => x.id === lid), d = todayStr();
+  if (!l || l.h) return;
+  if (curTaskOf(d, lid)) { toast('이미 오늘 과제칸에 있습니다.'); return; }
+  setTasks(d, [...getTasks(d), { id: uid(), text: l.text, memo: l.memo || '', cue: '', due: '', done: false, projectId: null, milestoneId: null, area: c.area, cur: cid, les: lid }]);
+  toast(`'${l.text}'을(를) 오늘 과제칸에 올렸습니다.`);
+}
+// 레슨 끝냄: 레슨에 날짜·한 줄을 남기고, 그날 기록에 한 줄(영역·분) — 목표·통계에 들어감
+function completeLesson(cid, lid, { date = todayStr(), min = 0, note = '' } = {}) {
+  const c = curOf(cid), l = c && lessonsOf(c).find(x => x.id === lid);
+  if (!l || l.h) return;
+  updLesson(cid, lid, { done: date, note: note || l.note || '', skip: false });
+  setLogs(date, [...getLogs(date).filter(x => x.les !== lid), { id: uid(), text: `${c.name} · ${l.text}`, area: c.area, min: Math.max(0, Math.min(600, Math.round(Number(min) || 0))), src: 'cur', cur: cid, les: lid, at: Date.now() }]);
+}
+function undoLesson(cid, lid) {
+  const l = lessonsOf(curOf(cid)).find(x => x.id === lid);
+  if (!l?.done) return;
+  setLogs(l.done, getLogs(l.done).filter(x => x.les !== lid));
+  updLesson(cid, lid, { done: '' });
+}
+// 레슨에서 올린 과제를 체크하면 레슨도 끝냄(시간은 타이머 기록에 따로 들어가므로 0분), 체크를 풀면 되돌림
+function lessonByTask(date, t, done) {
+  const c = curOf(t.cur), l = c && lessonsOf(c).find(x => x.id === t.les);
+  if (!l) return;
+  if (done && !l.done) { completeLesson(c.id, l.id, { date, min: 0 }); ui.curNote = { cid: c.id, lid: l.id }; }
+  else if (!done && l.done === date && getLogs(date).some(x => x.les === l.id && !Number(x.min))) { undoLesson(c.id, l.id); if (ui.curNote?.lid === l.id) ui.curNote = null; }
+}
+// 활동 시간 칸(영역)에 띄울 다음 레슨: 같은 영역이거나, 칸이 큰 영역이면 그 안의 세부 영역 커리큘럼
+function curNextFor(area) {
+  const bi = areaInfo(area);
+  for (const c of curActive()) {
+    const ci = areaInfo(c.area);
+    if (c.area === area || (!bi.a.parent && ci.top.id === bi.top.id)) { const n = curInfo(c).next; if (n) return { c, l: n }; }
+  }
+  return null;
+}
+// 이 날 잡아 둔 레슨·끝낸 레슨(주 화면)
+function curOnDate(d) {
+  const out = [];
+  for (const c of curActive()) {
+    if (!inFilter(c)) continue;
+    for (const l of lessonsOf(c)) if (!l.h && (l.done === d || (l.date === d && !l.done && !l.skip))) out.push({ c, l });
+  }
+  return out;
+}
+
+function curDoneForm(l) {
+  return `<div class="cur-form">
+    <input id="cd-note" data-enter="cur-done-save" placeholder="한 줄 요약·감상 (선택)" maxlength="140" autocomplete="off" aria-label="한 줄 남기기">
+    <div class="cur-form-row"><label class="field inline"><span>걸린 시간</span><input id="cd-min" type="number" min="0" max="600" inputmode="numeric" value="${l.min || 30}" data-enter="cur-done-save"></label><span class="muted small">분</span>
+      <span class="btn-row tight"><button type="button" class="btn sm primary" data-action="cur-done-save">끝냄</button><button type="button" class="btn sm" data-action="cur-done-cancel">취소</button></span></div>
+  </div>`;
+}
+const isDoneOpen = (cid, lid) => ui.curDone?.cid === cid && ui.curDone?.lid === lid;
+
+// 오늘 화면: 커리큘럼마다 다음 레슨(+ 오늘로 잡아 둔 레슨)
+function curTodayCard(date) {
+  if (date !== todayStr()) return '';
+  const cs = curActive().filter(inFilter);
+  if (!cs.length) return '';
+  const lessonRow = (c, I, x, dated) => {
+    const task = curTaskOf(date, x.id), sec = I.secOf.get(x.id);
+    return `<div class="ct-les">
+      <span class="ct-text"><small class="muted">${I.num.get(x.id)}번째${sec ? ` · ${esc(sec)}` : ''}${dated ? ' · 오늘로 잡아 둠' : ''}</small><b>${esc(x.text)}</b>${x.min || x.opt ? `<small class="muted">${[x.min ? fmtDur(x.min) : '', x.opt ? '선택 레슨' : ''].filter(Boolean).join(' · ')}</small>` : ''}${x.memo ? `<small class="ct-memo">${linkify(x.memo)}</small>` : ''}</span>
+      <span class="ct-acts">${task ? `<span class="muted small">${task.done ? '과제 끝냄' : '과제칸에 있음'}</span>` : `<button type="button" class="chip-btn" data-action="cur-task" data-c="${c.id}" data-l="${x.id}">과제로</button>`}${x.opt ? `<button type="button" class="chip-btn" data-action="cur-skip" data-c="${c.id}" data-l="${x.id}">건너뛰기</button>` : ''}<button type="button" class="chip-btn on" data-action="cur-done-open" data-c="${c.id}" data-l="${x.id}">✓ 끝냄</button></span>
+    </div>${isDoneOpen(c.id, x.id) ? curDoneForm(x) : ''}`;
+  };
+  const rows = cs.map(c => {
+    const I = curInfo(c), ai = areaInfo(c.area), n = I.next;
+    const dated = I.ls.filter(x => x.date === date && lessonLeft(x) && x.id !== n?.id);
+    const nl = ui.curNote?.cid === c.id ? I.ls.find(x => x.id === ui.curNote.lid && x.done) : null;
+    return `<li class="ct-item" style="--ac:${ai.color}">
+      <button type="button" class="ct-head" data-action="cur-open" data-id="${c.id}"><b>${esc(ai.emoji)} ${esc(c.name)}</b><small>${I.done}/${I.base}${I.pace ? ` · 이번 주 ${I.week}/${I.pace}` : ''}</small></button>
+      ${nl ? `<div class="ct-note"><span>✓ <b>${esc(nl.text)}</b> 끝냄 — 한 줄 남길까요?</span><input id="cn-text" data-enter="cur-note-save" placeholder="한 줄 요약·감상" maxlength="140" autocomplete="off" aria-label="한 줄 남기기"><span class="btn-row tight"><button type="button" class="btn sm primary" data-action="cur-note-save">남기기</button><button type="button" class="btn sm" data-action="cur-note-skip">괜찮아요</button></span></div>` : ''}
+      ${dated.map(x => lessonRow(c, I, x, true)).join('')}
+      ${n ? lessonRow(c, I, n, n.date === date) : `<p class="muted small">${I.total ? '레슨을 모두 끝냈습니다.' : '레슨이 아직 없습니다.'}</p>`}
+    </li>`;
+  }).join('');
+  return `<article class="card cur-today">
+    <div class="card-head"><h2>커리큘럼</h2><button type="button" class="link-btn" data-action="nav" data-view="curriculum">전체 보기</button></div>
+    <ul class="ct-list">${rows}</ul>
+  </article>`;
+}
+
+function curTemplateCard() {
+  return `<article class="card">
+    <div class="card-head"><h2>AI에게 짜 달라고 할 때</h2></div>
+    <p class="muted small">템플릿을 복사해 빈칸(배우려는 것, 지금 수준, 쓸 수 있는 시간)을 채운 뒤 AI에게 보내고, 받은 결과를 '새 커리큘럼'의 붙여 넣기 칸에 그대로 넣으세요. 형식이 조금 달라도 '#' 제목·'##' 단원·'-' 목록 줄을 기준으로 읽고, 시간(25분, 1시간)은 알아서 찾습니다. 레슨을 작게 나누고 밀린 것을 몰아서 하는 구조를 피하라는 요청도 들어 있습니다.</p>
+    <div class="btn-row"><button type="button" class="btn" data-action="cur-tpl">템플릿 복사</button><button type="button" class="link-btn" data-action="cur-tpl-show">${ui.curTpl ? '접기' : '내용 보기'}</button></div>
+    ${ui.curTpl ? `<textarea class="code-box" rows="14" readonly aria-label="커리큘럼 템플릿">${esc(CUR_TEMPLATE)}</textarea>` : ''}
+  </article>`;
+}
+
+function curNewForm() {
+  return `<article class="card">
+    <div class="card-head"><h2>새 커리큘럼</h2></div>
+    <div class="fields">
+      <label class="field"><span>이름</span><input id="nc-name" placeholder="비우면 붙여 넣은 글의 '#' 제목을 씀" maxlength="80" autocomplete="off"></label>
+      <div class="field-row">
+        <label class="field"><span>영역</span><select id="nc-area">${areaOptions(defaultArea())}</select></label>
+        <label class="field"><span>속도</span><select id="nc-pace">${paceOptions(3)}</select></label>
+      </div>
+      <label class="field"><span>레슨 목록 붙여 넣기 (선택)</span><textarea id="nc-text" rows="8" placeholder="# 화성학 기초&#10;## 1단원 소리의 재료&#10;- 장음계와 반음 위치 | 25분 | 건반으로 쳐 보기&#10;- (선택) 음정 이름 외우기 | 15분"></textarea></label>
+      <p class="muted small">비워 두고 만든 뒤 레슨을 하나씩 더해도 됩니다. 속도는 '이번 주 몇 개'와 예상 완료일을 보여 주는 데만 쓰고, 못 채워도 밀린 레슨이 쌓이지 않습니다.</p>
+    </div>
+    <div class="btn-row"><button type="button" class="btn primary" data-action="cur-create">만들기</button><button type="button" class="btn" data-action="cur-new-cancel">취소</button></div>
+  </article>`;
+}
+
+function curCard(c) {
+  const I = curInfo(c), ai = areaInfo(c.area), n = I.next;
+  return `<article class="card cur-card" style="--ac:${ai.color}">
+    <button type="button" class="proj-head" data-action="cur-open" data-id="${c.id}">
+      <span class="proj-title"><b>${esc(ai.emoji)} ${esc(c.name)}</b><small>${areaTag(c)}${I.pace ? ` 주 ${I.pace}개 · 이번 주 ${I.week}/${I.pace}` : ''}</small></span>
+      <span class="proj-count">${I.done}/${I.base}<i class="chev">›</i></span>
+    </button>
+    <div class="bar" role="progressbar" aria-valuenow="${I.pct}" aria-valuemin="0" aria-valuemax="100"><i style="width:${I.pct}%"></i></div>
+    <p class="proj-next ${n ? '' : 'ok'}">${n ? `다음: ${I.num.get(n.id)}. ${esc(n.text)}${I.eta ? ` · 이 속도면 ${fmtMD(I.eta)}쯤 끝` : ''}` : I.total ? '레슨을 모두 끝냈습니다' : '레슨이 아직 없습니다'}</p>
+  </article>`;
+}
+
+function curLessonRow(c, I, l, idx, len) {
+  const open = ui.curOpen === l.id, k = `cu|${l.id}`;
+  const move = `<button type="button" class="icon-btn sm" data-action="cur-les-move" data-c="${c.id}" data-l="${l.id}" data-dir="-1" ${idx === 0 ? 'disabled' : ''} aria-label="위로">↑</button><button type="button" class="icon-btn sm" data-action="cur-les-move" data-c="${c.id}" data-l="${l.id}" data-dir="1" ${idx === len - 1 ? 'disabled' : ''} aria-label="아래로">↓</button>`;
+  const del = `<button type="button" class="btn sm danger" data-action="cur-les-del" data-c="${c.id}" data-l="${l.id}">지우기</button>`;
+  if (l.h) {
+    return `<li class="cu-sec ${open ? 'open' : ''}"><button type="button" class="cu-sec-head" data-action="cur-les-open" data-l="${l.id}" aria-expanded="${open}">${esc(l.text)}</button>
+      ${open ? `<div class="cu-edit"><input data-cles="text" data-c="${c.id}" data-l="${l.id}" data-key="${k}|text" value="${esc(l.text)}" maxlength="80" aria-label="단원 이름"><div class="btn-row tight">${move}${del}</div></div>` : ''}</li>`;
+  }
+  const isNext = I.next?.id === l.id;
+  const meta = [l.min ? fmtDur(l.min) : '', l.opt ? '선택' : '', l.date && !l.done ? `📅 ${fmtMD(l.date)}` : '', l.done ? `${fmtMD(l.done)} 끝냄` : '', l.skip && !l.done ? '건너뜀' : '', isNext ? '다음 레슨' : ''].filter(Boolean).join(' · ');
+  return `<li class="cu-les ${l.done ? 'done' : ''} ${l.skip && !l.done ? 'skip' : ''} ${isNext ? 'next' : ''} ${open ? 'open' : ''}">
+    <div class="cu-row">
+      <button type="button" class="cu-mark" data-action="${l.done ? 'cur-les-open' : 'cur-done-open'}" data-c="${c.id}" data-l="${l.id}" aria-label="${l.done ? '끝낸 레슨' : `${esc(l.text)} 끝냄으로 표시`}">${l.done ? '✓' : l.skip ? '–' : I.num.get(l.id)}</button>
+      <button type="button" class="cu-body" data-action="cur-les-open" data-l="${l.id}" aria-expanded="${open}"><b>${esc(l.text)}</b>${meta ? `<small>${meta}</small>` : ''}</button>
+    </div>
+    ${l.note ? `<p class="cu-note">“${esc(l.note)}”</p>` : ''}
+    ${l.memo && !open ? `<p class="cu-memo">${linkify(l.memo)}</p>` : ''}
+    ${isDoneOpen(c.id, l.id) && ui.curDone.at !== 'sum' ? curDoneForm(l) : ''}
+    ${open ? `<div class="cu-edit">
+      <input data-cles="text" data-c="${c.id}" data-l="${l.id}" data-key="${k}|text" value="${esc(l.text)}" maxlength="120" aria-label="레슨 이름">
+      <div class="cu-edit-row"><label class="field inline"><span>예상</span><input type="number" min="0" max="600" inputmode="numeric" data-cles="min" data-c="${c.id}" data-l="${l.id}" data-key="${k}|min" value="${l.min || ''}" aria-label="예상 분"></label><span class="muted small">분</span>
+        <label class="field inline"><span>날짜</span><input type="date" data-cles="date" data-c="${c.id}" data-l="${l.id}" value="${esc(l.date || '')}" aria-label="잡아 둘 날짜 (선택)"></label></div>
+      <input data-cles="memo" data-c="${c.id}" data-l="${l.id}" data-key="${k}|memo" value="${esc(l.memo || '')}" placeholder="메모·링크" maxlength="300" aria-label="메모">
+      ${l.done ? `<input data-cles="note" data-c="${c.id}" data-l="${l.id}" data-key="${k}|note" value="${esc(l.note || '')}" placeholder="한 줄 요약·감상" maxlength="140" aria-label="한 줄 남김">` : ''}
+      <label class="check"><input type="checkbox" data-cles="opt" data-c="${c.id}" data-l="${l.id}" ${l.opt ? 'checked' : ''}><span>선택 레슨 (건너뛰어도 되는 것)</span></label>
+      <div class="btn-row tight">${move}
+        ${l.done ? `<button type="button" class="btn sm" data-action="cur-undo" data-c="${c.id}" data-l="${l.id}">끝냄 취소</button>` : `<button type="button" class="btn sm" data-action="cur-task" data-c="${c.id}" data-l="${l.id}">오늘 과제로</button><button type="button" class="btn sm" data-action="cur-skip" data-c="${c.id}" data-l="${l.id}">${l.skip ? '건너뜀 취소' : '건너뛰기'}</button>`}
+        ${del}</div>
+    </div>` : ''}
+  </li>`;
+}
+
+function curDetail(c) {
+  const I = curInfo(c), ai = areaInfo(c.area), n = I.next;
+  return layoutView([
+    [`<header class="vhead plain cur-vhead"><button type="button" class="icon-btn" data-action="cur-back" aria-label="커리큘럼 목록">‹</button>
+      <div class="vtitle"><h1>${esc(ai.emoji)} ${esc(c.name)}</h1><span class="sub">${esc(ai.full)}${c.archived ? ' · 보관됨' : ''}</span></div></header>`, 'full'],
+    [`<article class="card cur-sum" style="--ac:${ai.color}">
+      <div class="cur-sum-top"><b>${I.done}<small>/${I.base}</small></b><span class="muted small">끝낸 레슨${I.skipped ? ` · 건너뜀 ${I.skipped}` : ''}${I.pace ? `<br>이번 주 ${I.week}/${I.pace}${I.eta ? ` · 이 속도면 ${fmtMD(I.eta)}쯤 끝` : ''}` : ''}</span></div>
+      <div class="bar"><i style="width:${I.pct}%"></i></div>
+      ${n ? `<div class="cur-next"><span><small class="muted">다음 레슨</small><b>${I.num.get(n.id)}. ${esc(n.text)}</b></span><span class="btn-row tight">${curTaskOf(todayStr(), n.id) ? '<span class="muted small">과제칸에 있음</span>' : `<button type="button" class="chip-btn" data-action="cur-task" data-c="${c.id}" data-l="${n.id}">오늘 과제로</button>`}<button type="button" class="chip-btn on" data-action="cur-done-open" data-c="${c.id}" data-l="${n.id}" data-at="sum">✓ 끝냄</button></span></div>
+        ${isDoneOpen(c.id, n.id) && ui.curDone.at === 'sum' ? curDoneForm(n) : ''}` : ''}
+    </article>`, 'main'],
+    [`<article class="card">
+      <div class="card-head"><h2>레슨</h2><span class="muted small">번호를 누르면 끝냄, 이름을 누르면 고치기</span></div>
+      ${I.all.length ? `<ol class="cu-list">${I.all.map((l, i) => curLessonRow(c, I, l, i, I.all.length)).join('')}</ol>` : '<p class="muted small">아래에서 레슨을 더하거나, 계획 글을 붙여 넣어 한 번에 넣으세요.</p>'}
+      <div class="add-row cu-add"><input id="cu-new" data-enter="cur-les-add" placeholder="레슨 이름" maxlength="120" autocomplete="off" aria-label="새 레슨 이름"><input id="cu-new-min" type="number" min="0" max="600" inputmode="numeric" placeholder="분" data-enter="cur-les-add" aria-label="예상 분"><button type="button" class="btn" data-action="cur-les-add">추가</button></div>
+      <div class="btn-row tight"><button type="button" class="link-btn" data-action="cur-sec-add">+ 칸의 글자로 단원 제목 넣기</button><button type="button" class="link-btn" data-action="cur-paste-open">${ui.curPaste ? '붙여 넣기 접기' : '붙여 넣어 여러 개 넣기'}</button></div>
+      ${ui.curPaste ? `<textarea id="cp-text" rows="7" placeholder="## 2단원&#10;- 레슨 이름 | 30분 | 메모"></textarea><div class="btn-row tight"><button type="button" class="btn sm primary" data-action="cur-paste-add">끝에 넣기</button></div>` : ''}
+    </article>`, 'main'],
+    [`<article class="card">
+      <div class="card-head"><h2>설정</h2></div>
+      <div class="fields">
+        <label class="field"><span>이름</span><input data-cur="name" data-key="cur|${c.id}|name" value="${esc(c.name)}" maxlength="80"></label>
+        <label class="field"><span>영역</span><select data-cur="area">${areaOptions(c.area)}</select></label>
+        <label class="field"><span>속도</span><select data-cur="pace">${paceOptions(c.pace || 0)}</select></label>
+      </div>
+      <div class="btn-row"><button type="button" class="btn" data-action="cur-archive" data-id="${c.id}">${c.archived ? '보관함에서 꺼내기' : '보관하기'}</button><button type="button" class="btn danger" data-action="cur-del" data-id="${c.id}">지우기</button></div>
+    </article>`, 'side'],
+    [curTemplateCard(), 'side'],
+  ], 'cur-view');
+}
+
+function viewCurricula() {
+  const c = curOf(ui.curId);
+  if (c) return curDetail(c);
+  const all = curList().filter(inFilter), active = all.filter(x => !x.archived), arch = all.filter(x => x.archived);
+  return `<section class="view">
+    <header class="vhead plain">
+      <div class="vtitle"><h1>커리큘럼</h1><span class="sub">순서대로 한 칸씩 — 날짜에 묶지 않아 밀린 레슨이 쌓이지 않습니다</span></div>
+      ${ui.curNew ? '' : '<button type="button" class="btn primary" data-action="cur-new">새 커리큘럼</button>'}
+    </header>
+    ${areaFilterBar()}
+    ${ui.curNew ? curNewForm() : ''}
+    ${active.length ? `<div class="proj-grid">${active.map(curCard).join('')}</div>` : ui.curNew ? '' : `<article class="card"><p class="muted">${areaFilter() ? '이 영역에 커리큘럼이 없습니다.' : '아직 커리큘럼이 없습니다.'} 화성학·드럼 루디먼트·그림 기초처럼 순서가 있는 공부를 레슨으로 나눠 두면, 오늘 화면과 활동 시간 칸에 다음 레슨이 뜨고 끝낼 때마다 기록에 들어갑니다.</p></article>`}
+    ${curTemplateCard()}
+    ${arch.length ? `<button type="button" class="link-btn" data-action="cur-arch-toggle">${ui.curShowArch ? '보관함 접기' : `보관된 커리큘럼 ${arch.length}개 보기`}</button>
+      ${ui.curShowArch ? `<div class="proj-grid">${arch.map(curCard).join('')}</div>` : ''}` : ''}
+  </section>`;
+}
+
 /* ───────── 시간표 ───────── */
 function timelineCard(date) {
   const R = routineOf(settings().routine), rec = dayRec(date), off = !!rec.routineOff;
@@ -1851,7 +2097,8 @@ function timelineCard(date) {
     const lg = act ? logs.find(l => l.rt === b.id) : null;
     const doneBtn = act && date <= todayStr()
       ? `<button type="button" class="tl-mini-add rt-done ${lg ? 'on' : ''}" data-action="rt-log" data-date="${date}" data-id="${b.id}" aria-pressed="${!!lg}" aria-label="${esc(name)} ${lg ? '기록 지우기' : '했음으로 기록'}">${lg ? `✓ ${fmtDur(Number(lg.min) || 0)}` : '✓ 했음'}</button>` : '';
-    const sub = [act && b.title ? esc(ai.full) : '', f.tasks.length ? `과제 ${f.tasks.length}개` : ''].filter(Boolean).join(' · ');
+    const nl = act && date >= todayStr() ? curNextFor(b.area) : null;
+    const sub = [act && b.title ? esc(ai.full) : '', f.tasks.length ? `과제 ${f.tasks.length}개` : '', nl ? `다음 레슨: ${esc(nl.l.text)}` : ''].filter(Boolean).join(' · ');
     return `<li class="tl-block ${act ? 'act' : ''} ${lg ? 'logged' : ''} ${clsOf(f)}"${act ? ` style="--ac:${ai.color}"` : ''}>
       <div class="tl-item fixed">${timeOf(f)}<span class="tl-body"><b>${act ? `${esc(ai.emoji)} ` : ''}${esc(name)}</b>${sub ? `<small>${sub}</small>` : ''}</span>${addBtn || doneBtn ? `<span class="tl-acts">${addBtn}${doneBtn}</span>` : ''}</div>
       ${showInner ? `<ol class="tl tl-sub">${inner.map(x => (x.kind === 'task' ? taskLi(x) : gapLi(x, true))).join('')}</ol>` : ''}
@@ -2002,6 +2249,7 @@ function viewDay() {
       <div class="card-head"><h2>${isToday ? (ui.pinView ? '상시 과제칸' : '오늘의 과제') : '이 날의 과제'}</h2><span class="head-right">${isToday ? pinChip() : ''}${r.focusMin ? `<span class="muted small">집중 ${r.focusMin}분</span>` : ''}${isToday && 'documentPictureInPicture' in window ? `<button class="chip-btn ${pipWin ? 'on' : ''}" data-action="mt-pip">${pipWin ? '미션 창 닫기' : '미션 창'}</button>` : ''}<span class="pill ${r.started ? 'on' : ''}">${r.started ? '시작함' : '시작 전'}</span></span></div>
       ${isToday && ui.pinView ? pinPanel() : taskBlock(s)}
     </article>`, 'main'],
+    [curTodayCard(s), 'main'],
     [isToday
       ? timerCard(r)
       : `<article class="card slim"><label class="check"><input type="checkbox" data-bind="days|${s}|started" data-key="days|${s}|started" ${r.started ? 'checked' : ''}><span>이 날 시작한 것으로 표시</span></label></article>`, 'side'],
@@ -2031,7 +2279,8 @@ function viewWeek() {
     const evText = dayEv.map(e => (e.kind === 'deadline' ? `${esc(e.project)} 마감` : e.kind === 'tdue' ? `${esc(e.title)} 마감` : esc(e.title))).join(' · ');
     // 이 날의 활동 시간(고정 일과는 매일 비슷하므로 빼고, 영역 거르기를 따름)
     const lg = getLogs(d), acts = dayRoutine(d).filter(b => isActivity(b) && inFilter(b));
-    const actText = acts.map(b => `${esc(areaInfo(b.area).emoji)} ${esc(blockName(b))} ${esc(b.start)}${lg.some(l => l.rt === b.id) ? ' ✓' : ''}`).join(' · ');
+    const actText = [...acts.map(b => `${esc(areaInfo(b.area).emoji)} ${esc(blockName(b))} ${esc(b.start)}${lg.some(l => l.rt === b.id) ? ' ✓' : ''}`),
+      ...curOnDate(d).map(({ l }) => `📘 ${esc(l.text)}${l.done === d ? ' ✓' : ''}`)].join(' · ');
     return `<li><button class="day-row ${d === t ? 'today' : ''}" data-action="goto-day" data-date="${d}">
       <span class="dr-date"><b>${DOW[parse(d).getDay()]}</b>${parse(d).getDate()}</span>
       <span class="dr-main">${miniTasks(d)}${actText ? `<small class="dr-acts">${actText}</small>` : ''}${evText ? `<small>${evText}</small>` : ''}</span>
@@ -2550,8 +2799,8 @@ function shell() {
   if (s.phase === 'error') return center(`<h1>열 수 없습니다</h1><p class="muted">${esc(s.error)}</p>`);
   if (s.phase === 'loading' || s.phase === 'syncing') return center(`<p class="muted">불러오는 중…</p>`);
   if (s.phase === 'login') return viewAuth();
-  const tabs = [['day', '오늘'], ['week', '주'], ['month', '달'], ['projects', '프로젝트'], ['stats', '기록'], ['timer', '타이머']];
-  const views = { day: viewDay, week: viewWeek, month: viewMonth, projects: viewProjects, stats: viewStats, timer: viewTimer, settings: viewSettings };
+  const tabs = [['day', '오늘'], ['week', '주'], ['month', '달'], ['projects', '프로젝트'], ['curriculum', '커리큘럼'], ['stats', '기록'], ['timer', '타이머']];
+  const views = { day: viewDay, week: viewWeek, month: viewMonth, projects: viewProjects, curriculum: viewCurricula, stats: viewStats, timer: viewTimer, settings: viewSettings };
   return `<div class="layout">
     <header class="topbar">
       <span class="brand">Planerr</span>
@@ -2585,7 +2834,18 @@ function render() {
     if ('value' in a && a.type !== 'checkbox') val = a.value;
     try { sel = [a.selectionStart, a.selectionEnd]; } catch { sel = null; }
   }
+  const tabX = $app.querySelector('.tabs')?.scrollLeft || 0;
   $app.innerHTML = shell();
+  // 탭 줄이 넘치면 옆으로 밀 수 있음: 다시 그려도 밀어 둔 위치를 지키고, 고른 탭이 가려지면 보이게
+  const nav = $app.querySelector('.tabs'), at = nav?.querySelector('.tab.active');
+  if (nav && nav.scrollWidth > nav.clientWidth + 1) {
+    nav.scrollLeft = tabX;
+    if (at) {
+      const nr = nav.getBoundingClientRect(), ar = at.getBoundingClientRect();
+      if (ar.left < nr.left) nav.scrollLeft -= nr.left - ar.left + 16;
+      else if (ar.right > nr.right) nav.scrollLeft += ar.right - nr.right + 16;
+    }
+  }
   if (key) {
     const el = $app.querySelector(key);
     if (el) {
@@ -2726,6 +2986,7 @@ const actions = {
     if (v === 'day') ui.day = t;
     if (v === 'week') ui.week = weekStart(t);
     if (v === 'month') ui.month = t.slice(0, 7);
+    if (v === 'curriculum' && ui.view === 'curriculum') ui.curId = null; // 커리큘럼 탭을 한 번 더 누르면 목록으로
     ui.view = v; render(); scrollTop();
   },
   'day-prev'() { ui.day = addDays(ui.day, -1); render(); },
@@ -3009,6 +3270,115 @@ const actions = {
     if (!b || !isActivity(b) || date > todayStr()) return;
     addLog(date, { text: b.title || '', area: b.area, min: toMin(b.end) - toMin(b.start), src: 'routine', rt: id });
     toast(`${blockName(b)} ${fmtDur(toMin(b.end) - toMin(b.start))}을 기록했습니다.`);
+  },
+  // ── 커리큘럼
+  'cur-new'() { ui.curNew = true; render(); document.getElementById('nc-name')?.focus(); },
+  'cur-new-cancel'() { ui.curNew = false; render(); },
+  'cur-create'() {
+    const parsed = parseCurriculum(document.getElementById('nc-text')?.value || '');
+    const name = (inVal('nc-name') || parsed.name).slice(0, 80);
+    if (!name) { document.getElementById('nc-name')?.focus(); toast('이름을 적거나, 붙여 넣는 글 첫 줄에 # 제목을 넣어 주세요.'); return; }
+    const area = inVal('nc-area') || defaultArea(), id = uid();
+    const list = parsed.items.map(x => ({ id: uid(), ...x }));
+    const tm = list.length ? mapPatch(null, list) : null;
+    store.patch('curricula', id, { name, area, pace: Number(inVal('nc-pace')) || 0, created: Date.now(), ...(tm ? { lessons: tm } : {}) });
+    lsSet(LA_KEY, area);
+    ui.curNew = false; ui.curId = id; ui.curOpen = null;
+    const nl = list.filter(x => !x.h).length, ns = list.length - nl;
+    render(); scrollTop();
+    toast(nl ? `레슨 ${nl}개${ns ? `(단원 ${ns}개)` : ''}를 넣었습니다.` : '커리큘럼을 만들었습니다. 레슨을 더해 주세요.');
+  },
+  'cur-open'(el) { ui.view = 'curriculum'; ui.curId = el.dataset.id; ui.curOpen = null; ui.curPaste = false; render(); scrollTop(); },
+  'cur-back'() { ui.curId = null; ui.curOpen = null; ui.curDone = null; render(); scrollTop(); },
+  'cur-arch-toggle'() { ui.curShowArch = !ui.curShowArch; render(); },
+  async 'cur-tpl'() {
+    try { await navigator.clipboard.writeText(CUR_TEMPLATE); toast('템플릿을 복사했습니다. 빈칸을 채워 AI에게 보내 주세요.'); }
+    catch { ui.curTpl = true; render(); toast("복사가 막혀 있어 내용을 펼쳤습니다. 칸 안을 전부 선택해 복사해 주세요."); }
+  },
+  'cur-tpl-show'() { ui.curTpl = !ui.curTpl; render(); },
+  'cur-done-open'(el) {
+    const { c, l } = el.dataset;
+    ui.curDone = isDoneOpen(c, l) && ui.curDone.at === (el.dataset.at || '') ? null : { cid: c, lid: l, at: el.dataset.at || '' };
+    render();
+    document.getElementById('cd-note')?.focus();
+  },
+  'cur-done-cancel'() { ui.curDone = null; render(); },
+  'cur-done-save'() {
+    const d = ui.curDone, cur = d && curOf(d.cid), l = cur && lessonsOf(cur).find(x => x.id === d.lid);
+    if (!l) { ui.curDone = null; render(); return; }
+    const min = Number(inVal('cd-min')) || 0, note = inVal('cd-note').slice(0, 140), t = todayStr();
+    ui.curDone = null;
+    completeLesson(d.cid, d.lid, { date: t, min, note });
+    // 과제칸에 올려 둔 같은 레슨도 끝냄으로(과제 쪽 연결은 다시 돌지 않게 직접 저장)
+    const task = curTaskOf(t, d.lid);
+    if (task && !task.done) setTasks(t, getTasks(t).map(x => (x.id === task.id ? { ...x, done: true } : x)));
+    toast(`'${l.text}' 끝냄${min ? ` · ${fmtDur(min)} 기록` : ''}`);
+  },
+  'cur-note-save'() {
+    const n = ui.curNote, note = inVal('cn-text').slice(0, 140);
+    ui.curNote = null;
+    if (n && note) updLesson(n.cid, n.lid, { note }); else render();
+  },
+  'cur-note-skip'() { ui.curNote = null; render(); },
+  'cur-task'(el) { lessonTask(el.dataset.c, el.dataset.l); },
+  'cur-skip'(el) {
+    const { c, l } = el.dataset, x = lessonsOf(curOf(c)).find(y => y.id === l);
+    if (!x) return;
+    updLesson(c, l, { skip: !x.skip });
+    if (!x.skip) toast(`'${x.text}'을(를) 건너뛰었습니다. 레슨 목록에서 되살릴 수 있습니다.`);
+  },
+  'cur-undo'(el) { undoLesson(el.dataset.c, el.dataset.l); toast('끝냄을 취소했습니다. 그날 기록에서도 뺐습니다.'); },
+  'cur-les-open'(el) { ui.curOpen = ui.curOpen === el.dataset.l ? null : el.dataset.l; render(); },
+  'cur-les-move'(el) {
+    const { c, l } = el.dataset, list = lessonsOf(curOf(c)), i = list.findIndex(x => x.id === l), j = i + Number(el.dataset.dir);
+    if (i < 0 || j < 0 || j >= list.length) return;
+    [list[i], list[j]] = [list[j], list[i]];
+    setLessons(c, list);
+  },
+  'cur-les-del'(el) {
+    const { c, l } = el.dataset, list = lessonsOf(curOf(c)), x = list.find(y => y.id === l);
+    if (!x || !confirm(x.h ? `단원 제목 '${x.text}'을(를) 지울까요? 그 안의 레슨은 남습니다.` : `레슨 '${x.text}'을(를) 지울까요?${x.done ? ' 이미 남긴 기록은 그대로 둡니다.' : ''}`)) return;
+    if (ui.curOpen === l) ui.curOpen = null;
+    setLessons(c, list.filter(y => y.id !== l));
+  },
+  'cur-les-add'() {
+    const c = curOf(ui.curId), text = inVal('cu-new').slice(0, 120);
+    if (!c) return;
+    if (!text) { document.getElementById('cu-new')?.focus(); return; }
+    const min = Math.max(0, Math.min(600, Math.round(Number(inVal('cu-new-min')) || 0)));
+    setLessons(c.id, [...lessonsOf(c), { id: uid(), text, ...(min ? { min } : {}) }]);
+    document.getElementById('cu-new')?.focus();
+    const a = document.getElementById('cu-new'), b = document.getElementById('cu-new-min');
+    if (a) a.value = ''; if (b) b.value = '';
+  },
+  'cur-sec-add'() {
+    const c = curOf(ui.curId), text = inVal('cu-new').slice(0, 80);
+    if (!c) return;
+    if (!text) { document.getElementById('cu-new')?.focus(); toast('단원 이름을 레슨 칸에 적고 다시 눌러 주세요.'); return; }
+    setLessons(c.id, [...lessonsOf(c), { id: uid(), text, h: true }]);
+    const a = document.getElementById('cu-new'); if (a) a.value = '';
+  },
+  'cur-paste-open'() { ui.curPaste = !ui.curPaste; render(); document.getElementById('cp-text')?.focus(); },
+  'cur-paste-add'() {
+    const c = curOf(ui.curId), parsed = parseCurriculum(document.getElementById('cp-text')?.value || '');
+    if (!c) return;
+    const items = parsed.items.map(x => ({ id: uid(), ...x }));
+    if (!items.length) { toast('넣을 레슨을 찾지 못했습니다. 한 줄에 레슨 하나씩 적어 주세요.'); return; }
+    ui.curPaste = false;
+    setLessons(c.id, [...lessonsOf(c), ...items]);
+    toast(`레슨 ${items.filter(x => !x.h).length}개를 끝에 넣었습니다.`);
+  },
+  'cur-archive'(el) {
+    const c = curOf(el.dataset.id);
+    if (!c) return;
+    store.patch('curricula', c.id, { archived: !c.archived });
+    if (!c.archived) { ui.curId = null; toast(`'${c.name}'을(를) 보관함으로 옮겼습니다.`); }
+  },
+  'cur-del'(el) {
+    const c = curOf(el.dataset.id);
+    if (!c || !confirm(`'${c.name}' 커리큘럼을 지울까요? 레슨 ${curInfo(c).total}개가 함께 지워집니다. 기록·통계에 남은 시간은 그대로 둡니다.`)) return;
+    ui.curId = null;
+    store.remove('curricula', c.id);
   },
   'routine-day'(el) {
     const R = routineCopy(), b = R.blocks.find(x => x.id === el.dataset.id), d = Number(el.dataset.d);
@@ -3369,6 +3739,23 @@ $app.addEventListener('change', e => {
       if (toMin(b.end) <= toMin(b.start)) { toast('끝 시각이 시작보다 늦어야 합니다.'); render(); return; }
     }
     saveRoutine(R);
+    return;
+  }
+  if (el.dataset.cur) {
+    const c = curOf(ui.curId), f = el.dataset.cur, v = el.value.trim();
+    if (!c) return;
+    if (f === 'name') { if (!v) { render(); return; } store.patch('curricula', c.id, { name: v.slice(0, 80) }); }
+    else if (f === 'area') { store.patch('curricula', c.id, { area: v }); lsSet(LA_KEY, v); }
+    else if (f === 'pace') store.patch('curricula', c.id, { pace: Number(v) || 0 });
+    return;
+  }
+  if (el.dataset.cles) {
+    const { c, l } = el.dataset, f = el.dataset.cles;
+    let v = el.type === 'checkbox' ? el.checked : el.value.trim();
+    if (f === 'text' && !v) { render(); return; }
+    if (f === 'min') v = Math.max(0, Math.min(600, Math.round(Number(v) || 0)));
+    if (f === 'text') v = v.slice(0, 120);
+    updLesson(c, l, { [f]: v });
     return;
   }
   if (el.dataset.cl) {

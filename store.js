@@ -8,13 +8,14 @@
 //   projects/{id}      장기 과제: name, start, deadline, buffer, milestones[{id,title,due,done}], archived
 //   weeks/{월요일 날짜} 주간 목표: goals[{id,text,done,projectId}]
 //   meta/settings      설정: timerMin
+//   curricula/{id}     커리큘럼: name, area, pace, lessons{레슨 id: {text, min, done, note, …, o}} (curriculum.js)
 // 새 기능은 users/{uid} 아래에 컬렉션을 추가하면 되며, 보안 규칙을 고칠 필요가 없습니다.
 
 import { firebaseConfig } from './config.js';
 
 const LOCAL_KEY = 'planner.local.v1';
-export const COLS = ['days', 'projects', 'weeks', 'meta'];
-const emptyData = () => ({ days: {}, projects: {}, weeks: {}, meta: {} });
+export const COLS = ['days', 'projects', 'weeks', 'meta', 'curricula'];
+const emptyData = () => ({ days: {}, projects: {}, weeks: {}, meta: {}, curricula: {} });
 const clean = v => JSON.parse(JSON.stringify(v));
 
 // patch()에서 '이 항목을 지움'을 뜻하는 표시
