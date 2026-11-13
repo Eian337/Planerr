@@ -12,7 +12,7 @@ import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timeta
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.14.0';
+const APP_VERSION = '1.15.0';
 const BASE_TITLE = 'Planerr';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -176,6 +176,19 @@ function streaks() {
     prev = s;
   }
   return { cur, best, todayDone: started.has(t) };
+}
+
+/* ───────── 화면 너비에 맞춘 배치 ─────────
+   가로 1000px 이상(크롬북, 가로로 둔 아이패드)에서는 왼쪽 메뉴 + 두 칸 배치.
+   각 화면은 [html, 자리] 목록을 넘김: 'full'은 위 가로 전체, 'main'은 왼쪽(넓은) 칸, 'side'는 오른쪽 칸, 'end'는 맨 아래.
+   좁은 화면에서는 적은 순서 그대로 한 줄로 쌓음 */
+const WIDE = matchMedia('(min-width: 1000px)');
+const isWide = () => WIDE.matches;
+function layoutView(parts, cls = '') {
+  const items = parts.filter(([h]) => h);
+  if (!isWide()) return `<section class="view ${cls}">${items.map(([h]) => h).join('')}</section>`;
+  const pick = k => items.filter(([, c]) => c === k).map(([h]) => h).join('');
+  return `<section class="view wide2 ${cls}">${pick('full')}<div class="cols"><div class="col">${pick('main')}</div><div class="col side">${pick('side')}</div></div>${pick('end')}</section>`;
 }
 
 /* ───────── 마감 역산 ───────── */
@@ -1414,16 +1427,16 @@ function taskBlock(date) {
   const undone = all.filter(t => !t.done).length, hidden = all.length - tasks.length;
   const field = (t, f, label, ph) => `<label class="field"><span>${label}</span><input data-tfield="${f}" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|${f}" value="${esc(t[f] || '')}" placeholder="${ph}" maxlength="120" autocomplete="off"></label>`;
   // 메모는 모든 과제에, 시작 시점은 맨 위 과제(지금 할 과제)에만
-  const details = (t, isTop) => `<div class="fields">
+  const details = (t, isTop) => `<div class="fields task-fields">
       ${field(t, 'text', '과제', '과제 이름')}
-      <label class="field"><span>영역</span><select data-change="tarea" data-date="${date}" data-id="${t.id}" data-key="ta|${date}|${t.id}">${areaOptions(itemArea(t))}</select></label>
       <label class="field"><span>뭘 할지</span><textarea rows="2" data-tfield="memo" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|memo" maxlength="500" placeholder="예: 문제집 42쪽부터 3문제 풀기">${esc(t.memo || '')}</textarea></label>
       ${stepsField(date, t)}
       ${isTop ? field(t, 'cue', '시작 시점 (선택)', '예: 점심 먹고 책상에 앉으면') : ''}
       ${slotField(date, t)}
-      <label class="field"><span>마감일 (선택)</span><span class="time-row"><input type="date" data-tfield="due" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|due" value="${esc(t.due || '')}">${t.due ? `<button type="button" class="link-btn" data-action="t-due-clear" data-date="${date}" data-id="${t.id}">지우기</button>` : ''}</span></label>
-      <label class="field"><span>알림 시각 (선택)</span><span class="time-row"><input type="time" data-tfield="alarm" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|alarm" value="${esc(t.alarm || '')}">${t.alarm ? `<button type="button" class="link-btn" data-action="t-alarm-clear" data-date="${date}" data-id="${t.id}">지우기</button>` : ''}</span></label>
-      ${projects.length ? `<label class="field"><span>프로젝트</span><select data-change="tlink" data-date="${date}" data-id="${t.id}" data-key="tl|${date}|${t.id}">${linkOptions(t, projects)}</select></label>` : ''}
+      <label class="field half"><span>마감일 (선택)</span><span class="time-row"><input type="date" data-tfield="due" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|due" value="${esc(t.due || '')}">${t.due ? `<button type="button" class="link-btn" data-action="t-due-clear" data-date="${date}" data-id="${t.id}">지우기</button>` : ''}</span></label>
+      <label class="field half"><span>알림 시각 (선택)</span><span class="time-row"><input type="time" data-tfield="alarm" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|alarm" value="${esc(t.alarm || '')}">${t.alarm ? `<button type="button" class="link-btn" data-action="t-alarm-clear" data-date="${date}" data-id="${t.id}">지우기</button>` : ''}</span></label>
+      <label class="field half"><span>영역</span><select data-change="tarea" data-date="${date}" data-id="${t.id}" data-key="ta|${date}|${t.id}">${areaOptions(itemArea(t))}</select></label>
+      ${projects.length ? `<label class="field half"><span>프로젝트</span><select data-change="tlink" data-date="${date}" data-id="${t.id}" data-key="tl|${date}|${t.id}">${linkOptions(t, projects)}</select></label>` : ''}
     </div>
     ${isTop && t.cue ? `<p class="plan-line"><span>${esc(t.cue)}</span><i>→</i><span>${esc(t.text)}</span></p>` : ''}`;
   const focus = top
@@ -1560,7 +1573,7 @@ function stepsField(date, t) {
 
 function slotField(date, t) {
   const a = f => `data-tfield="${f}" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|${f}"`;
-  return `<div class="field"><span>할 시간 (선택) — 시간표에 표시되고 시작 시각에 알림</span>
+  return `<div class="field half"><span>할 시간 (선택) — 시간표에 표시되고 시작 시각에 알림</span>
     <span class="time-row"><input type="time" ${a('start')} value="${esc(t.start || '')}" aria-label="시작 시각"><span>~</span><input type="time" ${a('end')} value="${esc(t.end || '')}" aria-label="끝 시각">${t.start ? `<button type="button" class="link-btn" data-action="t-slot-clear" data-date="${date}" data-id="${t.id}">지우기</button>` : ''}</span>
   </div>`;
 }
@@ -1745,29 +1758,29 @@ function weekGoalsMini(s) {
 function viewDay() {
   const s = ui.day, t = todayStr(), isToday = s === t, r = dayRec(s), st = streaks();
   const tomorrow = addDays(t, 1);
-  return `<section class="view">
-    ${dateHeader(fmtMDW(s), isToday ? '오늘' : relLabel(diffDays(t, s)), 'day', !isToday, '오늘로')}
-    <div class="streak-strip">
+  return layoutView([
+    [dateHeader(fmtMDW(s), isToday ? '오늘' : relLabel(diffDays(t, s)), 'day', !isToday, '오늘로'), 'full'],
+    [`<div class="streak-strip">
       <div><b>${st.cur}</b><span>일 연속 시작</span></div>
       <div><b>${st.best}</b><span>최장 기록</span></div>
       <div class="${st.todayDone ? 'ok' : ''}"><b>${st.todayDone ? '✓' : '–'}</b><span>오늘 시작</span></div>
-    </div>
-    ${areaFilterBar()}
-    <article class="card">
+    </div>`, 'side'],
+    [areaFilterBar(), 'full'],
+    [`<article class="card">
       <div class="card-head"><h2>${isToday ? (ui.pinView ? '상시 과제칸' : '오늘의 과제') : '이 날의 과제'}</h2><span class="head-right">${isToday ? pinChip() : ''}${r.focusMin ? `<span class="muted small">집중 ${r.focusMin}분</span>` : ''}${isToday && 'documentPictureInPicture' in window ? `<button class="chip-btn ${pipWin ? 'on' : ''}" data-action="mt-pip">${pipWin ? '미션 창 닫기' : '미션 창'}</button>` : ''}<span class="pill ${r.started ? 'on' : ''}">${r.started ? '시작함' : '시작 전'}</span></span></div>
       ${isToday && ui.pinView ? pinPanel() : taskBlock(s)}
-    </article>
-    ${isToday
+    </article>`, 'main'],
+    [isToday
       ? timerCard(r)
-      : `<article class="card slim"><label class="check"><input type="checkbox" data-bind="days|${s}|started" data-key="days|${s}|started" ${r.started ? 'checked' : ''}><span>이 날 시작한 것으로 표시</span></label></article>`}
-    ${timelineCard(s)}
-    ${isToday ? `<article class="card">
+      : `<article class="card slim"><label class="check"><input type="checkbox" data-bind="days|${s}|started" data-key="days|${s}|started" ${r.started ? 'checked' : ''}><span>이 날 시작한 것으로 표시</span></label></article>`, 'side'],
+    [timelineCard(s), 'side'],
+    [isToday ? `<article class="card">
       <div class="card-head"><h2>내일 과제 정하기</h2><span class="muted small">${fmtMDW(tomorrow)}</span></div>
       ${taskBlock(tomorrow)}
-    </article>` : ''}
-    ${upcomingCard(s)}
-    ${weekGoalsMini(s)}
-  </section>`;
+    </article>` : '', 'main'],
+    [upcomingCard(s), 'side'],
+    [weekGoalsMini(s), 'side'],
+  ], 'day-view');
 }
 
 /* ───────── 주 화면 ───────── */
@@ -1788,10 +1801,10 @@ function viewWeek() {
       <span class="dr-side">${r.focusMin ? `<small class="muted">${r.focusMin}분</small>` : ''}<i class="dot ${r.started ? 'on' : d < t ? 'miss' : ''}" title="${r.started ? '시작함' : ''}"></i></span>
     </button></li>`;
   }).join('');
-  return `<section class="view">
-    ${dateHeader(`${fmtMD(ws)} – ${fmtMD(we)}`, isCur ? '이번 주' : `${Math.abs(n)}주 ${n < 0 ? '전' : '후'}`, 'week', !isCur, '이번 주로')}
-    ${areaFilterBar()}
-    <article class="card">
+  return layoutView([
+    [dateHeader(`${fmtMD(ws)} – ${fmtMD(we)}`, isCur ? '이번 주' : `${Math.abs(n)}주 ${n < 0 ? '전' : '후'}`, 'week', !isCur, '이번 주로'), 'full'],
+    [areaFilterBar(), 'full'],
+    [`<article class="card">
       <div class="card-head"><h2>이 주에 끝낼 결과물</h2>${goals.length ? `<span class="muted small">${doneN}/${goals.length}</span>` : ''}</div>
       ${goals.length ? `<ul class="goal-list">${goals.map(g => goalItem(ws, g, true)).join('')}</ul>` : `<p class="muted small">한 주에 한두 개면 충분합니다.</p>`}
       <div class="add-row">
@@ -1799,16 +1812,16 @@ function viewWeek() {
         ${projects.length ? `<select id="goal-proj" aria-label="프로젝트 연결"><option value="">연결 안 함</option>${projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>` : ''}
         <button class="btn primary" data-action="goal-add">추가</button>
       </div>
-    </article>
-    ${ev.length ? `<article class="card">
+    </article>`, 'side'],
+    [ev.length ? `<article class="card">
       <div class="card-head"><h2>마감 일정</h2><span class="muted small">과제 마감·프로젝트</span></div>
       <ul class="ev-list">${ev.map(evItem).join('')}</ul>
-    </article>` : ''}
-    <article class="card">
+    </article>` : '', 'side'],
+    [`<article class="card">
       <div class="card-head"><h2>요일별 과제</h2></div>
       <ul class="day-rows">${rows}</ul>
-    </article>
-  </section>`;
+    </article>`, 'main'],
+  ], 'week-view');
 }
 
 /* ───────── 달 화면 ───────── */
@@ -1923,7 +1936,7 @@ function viewProjects() {
     </header>
     ${areaFilterBar()}
     ${ui.newProject ? newProjectForm() : ''}
-    ${active.length ? active.map(projectCard).join('') : ui.newProject ? '' : empty}
+    ${active.length ? `<div class="proj-grid">${active.map(projectCard).join('')}</div>` : ui.newProject ? '' : empty}
     ${archived.length ? `<button class="link-btn" data-action="toggle-archived">${ui.showArchived ? '보관함 접기' : `보관된 프로젝트 ${archived.length}개 보기`}</button>
       ${ui.showArchived ? archived.map(p => `<article class="card slim archived">
         <span>${esc(p.name)} <small class="muted">${p.deadline ? `${fmtMD(p.deadline)} 마감` : ''}</small></span>
@@ -2048,12 +2061,10 @@ function viewTimer() {
   const pipOk = 'documentPictureInPicture' in window;
   const a2 = plById(musicMeta().alarm2Pl);
   const segBtn = (t, label, running, rem, id) => `<button type="button" class="${tab === t ? 'on' : ''}" data-action="timer-tab" data-t="${t}" role="tab" aria-selected="${tab === t}">${label}${running ? ` <span id="${id}" class="seg-time">${fmtClock(rem)}</span>` : ''}</button>`;
-  return `<section class="view">
-    <header class="vhead plain">
+  return layoutView([[`<header class="vhead plain">
       <div class="vtitle"><h1>타이머</h1><span class="sub">${task ? `오늘: ${esc(task)}` : '오늘 과제를 정하면 여기와 미션 창에 표시됩니다'}</span></div>
       ${pipOk ? `<button class="btn ${pipWin ? 'primary' : ''}" data-action="mt-pip">${pipWin ? '미션 창 닫기' : '미션 창'}</button>` : ''}
-    </header>
-    <div class="seg timer-seg" role="tablist" aria-label="타이머 종류">
+    </header>`, 'full'], [`<div class="seg timer-seg" role="tablist" aria-label="타이머 종류">
       ${segBtn('study', '📚 공부', mtRunning(), mtRemain(), 'mt-seg')}
       ${segBtn('alarm', '⏰ 알람', atRunning(), atRemain(), 'at-seg')}
     </div>
@@ -2063,9 +2074,7 @@ function viewTimer() {
     </article>` : `<article class="card mt-card at-card">
       ${timerFace('alarm')}
       <p class="muted small center">집중 시간 기록·공부 플리 없이 시간만 잽니다. 끝나면 ${a2 ? `'${esc(a2.name)}' 플리가` : '기본 알림음이'} 울립니다.</p>
-    </article>`}
-    ${musicCard()}
-  </section>`;
+    </article>`}`, 'main'], [musicCard(), 'side']], 'timer-view');
 }
 
 function atAlarmOverlay() {
@@ -2204,31 +2213,31 @@ function viewSettings() {
   const s = store.status;
   const local = s.mode === 'cloud' ? store.localBackup() : null;
   const hasLocal = !!local && Object.values(local).some(c => c && Object.keys(c).length);
-  return `<section class="view">
-    <header class="vhead plain"><div class="vtitle"><h1>설정</h1></div></header>
-    <article class="card">
+  return layoutView([
+    ['<header class="vhead plain"><div class="vtitle"><h1>설정</h1></div></header>', 'full'],
+    [`<article class="card">
       <div class="card-head"><h2>계정과 동기화</h2>${syncBadge('sync-badge-2')}</div>
       ${s.mode === 'cloud'
         ? `<p class="account">${esc(s.user?.email || '')}</p>
            <p class="muted small">같은 계정으로 로그인한 모든 기기에서 기록이 이어집니다. 오프라인에서 입력한 내용은 기기에 저장해 두었다가 연결되면 올립니다.</p>
            <div class="btn-row"><button class="btn" data-action="logout">로그아웃</button></div>`
         : `<p class="muted small">Firebase 설정 전이라 이 기기에만 저장됩니다. 설정 안내(README)의 단계를 마치면 기기 간 연동이 켜지고, 그때 이 기기의 기록을 계정으로 옮길 수 있습니다.</p>`}
-    </article>
-    <article class="card">
+    </article>`, 'main'],
+    [`<article class="card">
       <div class="card-head"><h2>과제</h2></div>
       <label class="check"><input type="checkbox" data-bind="meta|settings|autoCarry" data-key="meta|settings|autoCarry" ${settings().autoCarry === false ? '' : 'checked'}><span>못 끝낸 과제를 다음 날로 자동으로 넘기기 <small class="muted">(앱을 열 때 지난날 남은 과제를 오늘 목록 맨 아래로 옮김)</small></span></label>
-    </article>
-    ${areasCard()}
-    ${routineCard()}
-    ${checklistCard()}
-    <article class="card">
+    </article>`, 'main'],
+    [areasCard(), 'main'],
+    [routineCard(), 'main'],
+    [checklistCard(), 'main'],
+    [`<article class="card">
       <div class="card-head"><h2>오늘 화면의 시작 타이머</h2></div>
       <label class="field inline"><span>시작 타이머 길이(분)</span><input type="number" min="1" max="120" inputmode="numeric" data-bind="meta|settings|timerMin" data-key="meta|settings|timerMin" value="${timerMin()}"></label>
-    </article>
-    ${alarmCard()}
-    ${calendarCard()}
-    ${colorCard()}
-    <article class="card">
+    </article>`, 'main'],
+    [alarmCard(), 'side'],
+    [calendarCard(), 'side'],
+    [colorCard(), 'side'],
+    [`<article class="card">
       <div class="card-head"><h2>데이터</h2></div>
       <div class="btn-row wrap tight">
         <button class="btn" data-action="export">백업 파일 내보내기</button>
@@ -2236,9 +2245,9 @@ function viewSettings() {
         ${hasLocal ? `<button class="btn" data-action="import-local">이 기기의 로컬 기록 가져오기</button>` : ''}
       </div>
       ${restoreBox()}
-    </article>
-    <p class="muted small center">Planerr v${APP_VERSION}</p>
-  </section>`;
+    </article>`, 'side'],
+    [`<p class="muted small center">Planerr v${APP_VERSION}</p>`, 'end'],
+  ], 'settings-view');
 }
 
 /* ───────── 로그인 화면 ───────── */
@@ -3114,6 +3123,8 @@ store.subscribe(reason => {
   pipRefresh();
   if (store.status.phase === 'ready') { scheduleCalAuto(); scheduleDriveAuto(); migrateLegacyMusic(); refreshPlayers(); }
 });
+// 화면 너비가 기준(1000px)을 넘나들면 배치를 다시 그림(창 크기 조절, 아이패드 가로·세로 전환)
+try { WIDE.addEventListener('change', () => scheduleRender()); } catch { try { WIDE.addListener(() => scheduleRender()); } catch { /* 무시 */ } }
 addEventListener('online', () => {
   if (gcal.available) gcal.loadGis().catch(() => {});
   scheduleCalAuto();
