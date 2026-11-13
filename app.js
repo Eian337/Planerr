@@ -12,7 +12,7 @@ import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timeta
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.16.1';
+const APP_VERSION = '1.17.0';
 const BASE_TITLE = 'Planerr';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -727,8 +727,31 @@ const calConnected = () => !!calMeta().calendarId && (!!bridge() || gcal.availab
 const calCanSend = () => !!bridge() || gcal.hasScope(CAL_SCOPE); // 지금 사용자 동작 없이 보낼 수 있는지
 let calBusy = false, calAutoTimer = 0, calError = '';
 
+// 반복 시간 중 '구글 캘린더에도 넣기'를 켠 것: 오늘부터 RT_CAL_DAYS일치(앱을 열 때마다 앞으로 밀려 채워짐)
+const RT_CAL_DAYS = 14;
+function routineCalEvents() {
+  const out = [], t = todayStr();
+  if (!routineOf(settings().routine).blocks.some(b => b.cal)) return out;
+  for (let i = 0; i < RT_CAL_DAYS; i++) {
+    const d = addDays(t, i);
+    for (const b of dayRoutine(d)) {
+      if (!b.cal) continue;
+      const ai = isActivity(b) ? areaInfo(b.area) : null;
+      out.push({
+        id: hexId(`pl|rt|${d}|${b.id}`),
+        summary: ai ? `${ai.emoji} ${blockName(b)}` : blockName(b),
+        description: `Planerr: ${PLANNER_URL}`,
+        start: { dateTime: isoLocal(atTime(d, b.start)), timeZone: TZ },
+        end: { dateTime: isoLocal(atTime(d, b.end)), timeZone: TZ },
+        reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 10 }] },
+        extendedProperties: { private: { planner: '1', kind: 'routine' } },
+      });
+    }
+  }
+  return out;
+}
 function calDesired() {
-  return alarmSchedule().map(it => {
+  return [...alarmSchedule().map(it => {
     const task = it.kind === 'task';
     const start = task && it.slot ? it.slot[0] : it.at;
     const end = task && it.slot ? Math.max(it.slot[1], start + 5 * 60000) : start + (task ? 15 : 30) * 60000;
@@ -742,7 +765,7 @@ function calDesired() {
       reminders: { useDefault: false, overrides: minutes.map(m => ({ method: 'popup', minutes: m })) },
       extendedProperties: { private: { planner: '1', kind: it.kind } },
     };
-  });
+  }), ...routineCalEvents()];
 }
 
 // 캘린더에 아직 반영되지 않은 앞으로의 변경 개수
@@ -1610,6 +1633,7 @@ function rowTags(date, t, isTop, editing) {
 /* ───────── 기록(활동 시간) ─────────
    저장: days/{날짜}.lmap = { id: { text(메모), area, min, src, at } }
    src: timer(집중 타이머) · start(시작 타이머) · manual(직접 기록) · check(반복 목표 '했음', 0분)
+        · routine(시간표의 활동 시간 '✓ 했음', rt = 반복 시간 id)
    예전부터 쓰던 '집중 n분'(focusMin)은 타이머로 기록한 시간만 계속 더함.
    영역 정보가 없는 예전 집중 시간 = focusMin − (타이머 기록 합) → 통계에서는 학업으로 셈 */
 const getLogs = d => listOfMap(dayRec(d).lmap);
@@ -1620,7 +1644,7 @@ function setLogs(d, list) {
 function addLog(d, entry) { setLogs(d, [...getLogs(d), { id: uid(), text: '', at: Date.now(), ...entry }]); }
 const sumMin = list => list.reduce((a, l) => a + (Number(l.min) || 0), 0);
 const legacyMin = d => Math.max(0, (Number(dayRec(d).focusMin) || 0) - sumMin(getLogs(d).filter(l => l.src === 'timer' || l.src === 'start')));
-const SRC_LABEL = { timer: '집중 타이머', start: '시작 타이머', manual: '직접 기록', check: '했음' };
+const SRC_LABEL = { timer: '집중 타이머', start: '시작 타이머', manual: '직접 기록', check: '했음', routine: '시간표' };
 const datesIn = (a, b) => { const out = []; for (let d = a; d <= b; d = addDays(d, 1)) out.push(d); return out; };
 // 기간 안의 기록 전체(예전 집중 시간은 학업 기록 한 줄로)
 function logsIn(a, b) {
@@ -1794,7 +1818,7 @@ function timelineCard(date) {
   const R = routineOf(settings().routine), rec = dayRec(date), off = !!rec.routineOff;
   const dayBlocks = R.blocks.filter(b => (b.days || []).includes(isoDow(parse(date))));
   const tasks = getTasks(date);
-  const items = buildTimeline({ fixed: off ? [] : dayBlocks, tasks, dayStart: R.dayStart, dayEnd: R.dayEnd });
+  const items = buildTimeline({ fixed: dayRoutine(date), tasks, dayStart: R.dayStart, dayEnd: R.dayEnd });
   const isToday = date === todayStr(), nd = new Date(), nowMin = isToday ? nd.getHours() * 60 + nd.getMinutes() : -1;
   const unscheduled = tasks.filter(t => !t.done && toMin(t.start) == null);
   const timeOf = it => `<span class="tl-time">${toHM(it.s)}<i>${toHM(it.e)}</i></span>`;
@@ -1816,20 +1840,27 @@ function timelineCard(date) {
     }
     return `<li class="tl-item gap ${inner ? 'inner' : ''} ${clsOf(g)}">${timeOf(g)}<button type="button" class="tl-add" data-action="tl-open" data-date="${date}" data-s="${g.s}"><span>${inner ? '남은' : '빈'} 시간 ${fmtDur(g.e - g.s)}</span><b>+ 과제 넣기</b></button></li>`;
   };
+  const logs = getLogs(date);
   const blockLi = f => {
     // 과제가 없는 일과는 머리줄의 버튼으로 넣고, 과제가 있거나 넣는 중이면 일과 안에 과제·남은 시간을 펼쳐 보여 줌
+    const b = f.block, act = isActivity(b), ai = act ? areaInfo(b.area) : null, name = blockName(b);
     const showInner = f.tasks.length > 0 || f.gaps.some(isOpen);
     const inner = [...f.tasks, ...(f.tasks.length ? f.gaps : f.gaps.filter(isOpen))].sort((x, y) => x.s - y.s);
-    const addBtn = !showInner && f.gaps.length ? `<button type="button" class="tl-mini-add" data-action="tl-open" data-date="${date}" data-s="${f.gaps[0].s}" aria-label="${esc(f.block.title || '고정 일과')}에 과제 넣기">+ 넣기</button>` : '';
-    return `<li class="tl-block ${clsOf(f)}">
-      <div class="tl-item fixed">${timeOf(f)}<span class="tl-body"><b>${esc(f.block.title || '고정 일과')}</b>${f.tasks.length ? `<small>과제 ${f.tasks.length}개</small>` : ''}</span>${addBtn}</div>
+    const addBtn = !showInner && f.gaps.length ? `<button type="button" class="tl-mini-add" data-action="tl-open" data-date="${date}" data-s="${f.gaps[0].s}" aria-label="${esc(name)}에 과제 넣기">+ 넣기</button>` : '';
+    // 활동 시간은 '✓ 했음'으로 기록(→ 기록·목표·통계). 오늘과 지난날만
+    const lg = act ? logs.find(l => l.rt === b.id) : null;
+    const doneBtn = act && date <= todayStr()
+      ? `<button type="button" class="tl-mini-add rt-done ${lg ? 'on' : ''}" data-action="rt-log" data-date="${date}" data-id="${b.id}" aria-pressed="${!!lg}" aria-label="${esc(name)} ${lg ? '기록 지우기' : '했음으로 기록'}">${lg ? `✓ ${fmtDur(Number(lg.min) || 0)}` : '✓ 했음'}</button>` : '';
+    const sub = [act && b.title ? esc(ai.full) : '', f.tasks.length ? `과제 ${f.tasks.length}개` : ''].filter(Boolean).join(' · ');
+    return `<li class="tl-block ${act ? 'act' : ''} ${lg ? 'logged' : ''} ${clsOf(f)}"${act ? ` style="--ac:${ai.color}"` : ''}>
+      <div class="tl-item fixed">${timeOf(f)}<span class="tl-body"><b>${act ? `${esc(ai.emoji)} ` : ''}${esc(name)}</b>${sub ? `<small>${sub}</small>` : ''}</span>${addBtn || doneBtn ? `<span class="tl-acts">${addBtn}${doneBtn}</span>` : ''}</div>
       ${showInner ? `<ol class="tl tl-sub">${inner.map(x => (x.kind === 'task' ? taskLi(x) : gapLi(x, true))).join('')}</ol>` : ''}
     </li>`;
   };
   const rows = items.map(it => (it.kind === 'fixed' ? blockLi(it) : it.kind === 'task' ? taskLi(it) : gapLi(it, false))).join('');
   return `<article class="card tl-card">
-    <div class="card-head"><h2>시간표</h2><span class="head-right">${dayBlocks.length ? `<button type="button" class="link-btn" data-action="routine-off" data-date="${date}">${off ? '고정 일과 보이기' : '이 날은 일과 숨기기'}</button>` : ''}<button type="button" class="link-btn" data-action="goto-routine">일과 편집</button></span></div>
-    ${R.blocks.length ? '' : `<p class="muted small">설정에서 수업·자습 같은 고정 일과를 요일별로 등록하면, 그 시간을 뺀 빈 시간이 자동으로 보입니다.</p>`}
+    <div class="card-head"><h2>시간표</h2><span class="head-right">${dayBlocks.length ? `<button type="button" class="link-btn" data-action="routine-off" data-date="${date}">${off ? '반복 시간 보이기' : '이 날은 반복 시간 숨기기'}</button>` : ''}<button type="button" class="link-btn" data-action="goto-routine">반복 시간 편집</button></span></div>
+    ${R.blocks.length ? '' : `<p class="muted small">설정의 '반복 시간표'에 수업 같은 고정 일과나 '토 14–16시 드럼' 같은 활동 시간을 요일별로 등록하면, 여기에 들어오고 그 시간을 뺀 빈 시간이 자동으로 보입니다.</p>`}
     <ol class="tl">${rows}</ol>
     ${unscheduled.length ? `<p class="muted small">시간을 정하지 않은 과제 ${unscheduled.length}개 — 빈 시간이나 일과의 '+ 넣기'를 눌러 넣거나, 과제 편집에서 '할 시간'을 정하세요.</p>` : ''}
   </article>`;
@@ -1837,19 +1868,33 @@ function timelineCard(date) {
 
 function saveRoutine(R) { store.set('meta', 'settings', { routine: R }); }
 function routineCopy() { const R = routineOf(settings().routine); return { ...R, blocks: R.blocks.map(b => ({ ...b, days: [...(b.days || [])] })) }; }
+// 반복 시간: 영역이 없으면 회색 고정 일과(수업·식사), 영역이 있으면 그 영역의 활동 시간(드럼·운동)
+const isActivity = b => !!b?.area;
+const blockName = b => b.title || (isActivity(b) ? areaInfo(b.area).label : '고정 일과');
+// 이 날 시간표에 들어가는 반복 시간(숨긴 날이면 없음)
+function dayRoutine(date) {
+  if (dayRec(date).routineOff) return [];
+  const dow = isoDow(parse(date));
+  return routineOf(settings().routine).blocks.filter(b => (b.days || []).includes(dow) && toMin(b.start) != null && toMin(b.end) > toMin(b.start));
+}
 
 function routineCard() {
-  const R = routineOf(settings().routine), W = ['월', '화', '수', '목', '금', '토', '일'];
+  const R = routineOf(settings().routine), W = ['월', '화', '수', '목', '금', '토', '일'], cal = calConnected();
   return `<article class="card" id="routine-card">
-    <div class="card-head"><h2>고정 일과</h2><span class="muted small">시간표의 회색 칸</span></div>
-    <p class="muted small">수업·자습·식사처럼 요일마다 반복되는 시간을 등록하세요. 오늘 화면의 시간표에서 이 시간을 뺀 빈 시간에 과제를 넣을 수 있습니다.</p>
+    <div class="card-head"><h2>반복 시간표</h2><span class="muted small">고정 일과 · 활동 시간</span></div>
+    <p class="muted small">요일마다 반복되는 시간을 등록하세요. 수업·식사처럼 영역을 '없음'으로 두면 회색 고정 일과가 되고, 영역을 고르면 그 영역 색의 활동 시간이 됩니다(예: 토 14–16시 드럼). 활동 시간은 오늘 화면 시간표에서 '✓ 했음'을 누르면 그 시간만큼 기록·목표에 들어갑니다.</p>
     <div class="rt-range"><span>하루 시작</span><input type="time" data-routine="dayStart" value="${esc(R.dayStart)}" aria-label="하루 시작"><span>끝</span><input type="time" data-routine="dayEnd" value="${esc(R.dayEnd)}" aria-label="하루 끝"></div>
-    ${R.blocks.length ? `<ul class="rt-list">${R.blocks.map(b => `<li class="rt-item">
-      <div class="rt-row"><input data-routine="title" data-id="${b.id}" data-key="rt|${b.id}|title" value="${esc(b.title || '')}" placeholder="예: 수업" maxlength="40" aria-label="일과 이름"><button type="button" class="icon-btn sm" data-action="routine-del" data-id="${b.id}" aria-label="일과 삭제">×</button></div>
-      <div class="rt-row"><span class="time-row"><input type="time" data-routine="start" data-id="${b.id}" value="${esc(b.start)}" aria-label="시작"><span>~</span><input type="time" data-routine="end" data-id="${b.id}" value="${esc(b.end)}" aria-label="끝"></span></div>
+    ${R.blocks.length ? `<ul class="rt-list">${R.blocks.map(b => {
+      const act = isActivity(b), ai = act ? areaInfo(b.area) : null;
+      return `<li class="rt-item ${act ? 'act' : ''}"${act ? ` style="--ac:${ai.color}"` : ''}>
+      <div class="rt-row"><input data-routine="title" data-id="${b.id}" data-key="rt|${b.id}|title" value="${esc(b.title || '')}" placeholder="${act ? '예: 드럼' : '예: 수업'}" maxlength="40" aria-label="이름"><button type="button" class="icon-btn sm" data-action="routine-del" data-id="${b.id}" aria-label="반복 시간 삭제">×</button></div>
+      <div class="rt-row wrap"><span class="time-row"><input type="time" data-routine="start" data-id="${b.id}" value="${esc(b.start)}" aria-label="시작"><span>~</span><input type="time" data-routine="end" data-id="${b.id}" value="${esc(b.end)}" aria-label="끝"></span>
+        <select class="area-in" data-routine="area" data-id="${b.id}" aria-label="영역"><option value="" ${act ? '' : 'selected'}>영역 없음 (고정 일과)</option>${areaOptions(b.area || '')}</select></div>
       <div class="rt-days">${W.map((w, i) => { const on = (b.days || []).includes(i + 1); return `<button type="button" class="day-chip ${on ? 'on' : ''}" data-action="routine-day" data-id="${b.id}" data-d="${i + 1}" aria-pressed="${on}">${w}</button>`; }).join('')}</div>
-    </li>`).join('')}</ul>` : ''}
-    <div class="btn-row"><button type="button" class="btn" data-action="routine-add">+ 일과 추가</button></div>
+      ${cal || b.cal ? `<label class="check small"><input type="checkbox" data-routine="cal" data-id="${b.id}" ${b.cal ? 'checked' : ''}><span>구글 캘린더에도 넣기 <small class="muted">(앞으로 ${RT_CAL_DAYS / 7}주치, 10분 전 알림)</small></span></label>` : ''}
+    </li>`;
+    }).join('')}</ul>` : ''}
+    <div class="btn-row"><button type="button" class="btn" data-action="routine-add" data-kind="fixed">+ 고정 일과</button><button type="button" class="btn" data-action="routine-add" data-kind="act">+ 활동 시간</button></div>
   </article>`;
 }
 
@@ -1984,9 +2029,12 @@ function viewWeek() {
   const rows = Array.from({ length: 7 }, (_, i) => {
     const d = addDays(ws, i), r = dayRec(d), dayEv = ev.filter(e => e.date === d);
     const evText = dayEv.map(e => (e.kind === 'deadline' ? `${esc(e.project)} 마감` : e.kind === 'tdue' ? `${esc(e.title)} 마감` : esc(e.title))).join(' · ');
+    // 이 날의 활동 시간(고정 일과는 매일 비슷하므로 빼고, 영역 거르기를 따름)
+    const lg = getLogs(d), acts = dayRoutine(d).filter(b => isActivity(b) && inFilter(b));
+    const actText = acts.map(b => `${esc(areaInfo(b.area).emoji)} ${esc(blockName(b))} ${esc(b.start)}${lg.some(l => l.rt === b.id) ? ' ✓' : ''}`).join(' · ');
     return `<li><button class="day-row ${d === t ? 'today' : ''}" data-action="goto-day" data-date="${d}">
       <span class="dr-date"><b>${DOW[parse(d).getDay()]}</b>${parse(d).getDate()}</span>
-      <span class="dr-main">${miniTasks(d)}${evText ? `<small>${evText}</small>` : ''}</span>
+      <span class="dr-main">${miniTasks(d)}${actText ? `<small class="dr-acts">${actText}</small>` : ''}${evText ? `<small>${evText}</small>` : ''}</span>
       <span class="dr-side">${r.focusMin ? `<small class="muted">${r.focusMin}분</small>` : ''}<i class="dot ${r.started ? 'on' : d < t ? 'miss' : ''}" title="${r.started ? '시작함' : ''}"></i></span>
     </button></li>`;
   }).join('');
@@ -2938,18 +2986,29 @@ const actions = {
   'tl-unplace'(el) { updateTask(el.dataset.date, el.dataset.id, { start: '', end: '' }); },
   'routine-off'(el) { const d = el.dataset.date; store.set('days', d, { routineOff: !dayRec(d).routineOff }); },
   'goto-routine'() { ui.view = 'settings'; render(); document.getElementById('routine-card')?.scrollIntoView({ block: 'start' }); },
-  'routine-add'() {
+  'routine-add'(el) {
     const R = routineCopy(), id = uid();
-    R.blocks.push({ id, title: '', start: '08:30', end: '12:30', days: [1, 2, 3, 4, 5] });
+    if (el.dataset.kind === 'act') {
+      // 활동 시간: 마지막으로 쓴 영역, 오늘 요일, 저녁 한 시간으로 시작
+      R.blocks.push({ id, title: '', start: '19:00', end: '20:00', days: [isoDow(parse(todayStr()))], area: defaultArea() });
+    } else R.blocks.push({ id, title: '', start: '08:30', end: '12:30', days: [1, 2, 3, 4, 5] });
     saveRoutine(R);
     render();
     document.querySelector(`[data-key="rt|${id}|title"]`)?.focus();
   },
   'routine-del'(el) {
     const R = routineCopy(), b = R.blocks.find(x => x.id === el.dataset.id);
-    if (!b || !confirm(`'${b.title || '이름 없는 일과'}'을(를) 지울까요?`)) return;
+    if (!b || !confirm(`'${b.title || (isActivity(b) ? '이름 없는 활동' : '이름 없는 일과')}'을(를) 지울까요? 이미 남긴 기록은 그대로 둡니다.`)) return;
     R.blocks = R.blocks.filter(x => x.id !== b.id);
     saveRoutine(R);
+  },
+  'rt-log'(el) {
+    const { date, id } = el.dataset, have = getLogs(date).find(l => l.rt === id);
+    if (have) { setLogs(date, getLogs(date).filter(l => l.id !== have.id)); toast('이 활동 기록을 지웠습니다.'); return; }
+    const b = routineOf(settings().routine).blocks.find(x => x.id === id);
+    if (!b || !isActivity(b) || date > todayStr()) return;
+    addLog(date, { text: b.title || '', area: b.area, min: toMin(b.end) - toMin(b.start), src: 'routine', rt: id });
+    toast(`${blockName(b)} ${fmtDur(toMin(b.end) - toMin(b.start))}을 기록했습니다.`);
   },
   'routine-day'(el) {
     const R = routineCopy(), b = R.blocks.find(x => x.id === el.dataset.id), d = Number(el.dataset.d);
@@ -3285,6 +3344,14 @@ $app.addEventListener('change', e => {
   if (el.id === 'restore-file') { if (el.files?.[0]) restoreLoad(el.files[0]); el.value = ''; return; }
   if (el.dataset.routine) {
     const R = routineCopy(), f = el.dataset.routine, v = el.value.trim();
+    if (f === 'cal' || f === 'area') {
+      const b = R.blocks.find(x => x.id === el.dataset.id);
+      if (!b) return;
+      if (f === 'cal') b.cal = el.checked; else b.area = v;
+      if (f === 'area' && v) lsSet(LA_KEY, v);
+      saveRoutine(R);
+      return;
+    }
     if (f === 'dayStart' || f === 'dayEnd') {
       if (!v) { render(); return; }
       R[f] = v;

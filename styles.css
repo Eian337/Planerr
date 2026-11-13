@@ -787,3 +787,16 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 .st-legend i, .st-done i { width: 9px; height: 9px; border-radius: 3px; background: var(--ac); flex: none; }
 .st-done { display: grid; gap: 8px; }
 .st-done li { display: grid; grid-template-columns: 9px 1fr auto; font-size: 14px; }
+
+/* ── 반복 시간표: 활동 시간(영역 색) ── */
+.tl-block.act { background: color-mix(in srgb, var(--ac) 12%, var(--surface)); box-shadow: inset 3px 0 0 var(--ac); }
+.tl-block.act > .tl-item.fixed .tl-body b { opacity: 1; }
+.tl-acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.rt-done { color: var(--ac); border-color: color-mix(in srgb, var(--ac) 45%, var(--line)); }
+.rt-done.on { background: var(--ac); border-color: var(--ac); color: #fff; }
+.rt-item.act { box-shadow: inset 3px 0 0 var(--ac); }
+.rt-row.wrap { flex-wrap: wrap; }
+.rt-item select { background-color: var(--surface); }
+.rt-row .area-in { width: auto; flex: 1 1 170px; max-width: 280px; min-height: 38px; padding: 6px 10px; font-size: 15px; }
+.rt-item .check.small { font-size: 13.5px; }
+.dr-main small.dr-acts { color: var(--text); opacity: .8; }
