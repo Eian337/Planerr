@@ -10,10 +10,11 @@ import * as CFG from './config.js';
 import { GCal, syncCalendar, eventSig, hexId, insertEvent, eventsPath, CAL_SCOPE, DRIVE_SCOPE } from './calendar.js';
 import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timetable.js';
 import { CUR_TEMPLATE, parseCurriculum } from './curriculum.js';
+import { renderMd, plainPreview } from './md.js';
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.18.0';
+const APP_VERSION = '1.19.0';
 const BASE_TITLE = 'Planerr';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -51,7 +52,9 @@ const ui = {
   curOpen: null,     // 펼쳐 고치는 중인 레슨 id
   curDone: null,     // 끝냄 입력 중인 { cid, lid }
   curNote: null,     // 과제로 끝낸 레슨에 한 줄 남기기 { cid, lid }
-  curNew: false, curPaste: false, curTpl: false, curShowArch: false,
+  curLesson: null,   // 연 레슨 화면(레슨 id)
+  curEdit: null,     // 고치는 중인 레슨·단원 id
+  curNew: false, curPaste: false, curTpl: false, curShowArch: false, curGuide: false, curGuideEdit: false,
   statMode: 'week',  // 기록 화면: 'week' | 'month'
   statAnchor: null,  // 기록 화면이 보여 주는 기간 안의 날짜(없으면 오늘)
   logArea: null,     // 직접 기록 칸에 미리 골라 둘 영역(반복 목표의 '기록'에서)
@@ -1857,6 +1860,14 @@ function curInfo(c) {
   return { all, ls, done, skipped, left, total: ls.length, base, pace, week, num, secOf, eta, next: ls.find(lessonLeft) || null, pct: base ? Math.round((done / base) * 100) : 0 };
 }
 const curTaskOf = (date, lid) => getTasks(date).find(t => t.les === lid);
+const clipStr = (s, n) => (s.length > n ? s.slice(0, n) : s);
+function curImportMsg(list, parsed) {
+  const nl = list.filter(x => !x.h).length, ns = list.length - nl, nb = list.filter(x => !x.h && x.body).length;
+  const extra = [ns ? `단원 ${ns}개` : '', nb ? `설명 ${nb}개` : ''].filter(Boolean).join(', ');
+  const parts = [nl ? `레슨 ${nl}개${extra ? `(${extra})` : ''}` : '', parsed.guide ? '안내' : ''].filter(Boolean);
+  if (!parts.length) return '';
+  return `${parts.join('와 ')}를 넣었습니다.${parsed.dropped?.length ? ` '${parsed.dropped.join("', '")}'(체크 목록)은 앱이 대신 기록하므로 뺐습니다.` : ''}`;
+}
 function lessonTask(cid, lid) {
   const c = curOf(cid), l = c && lessonsOf(c).find(x => x.id === lid), d = todayStr();
   if (!l || l.h) return;
@@ -1903,26 +1914,30 @@ function curOnDate(d) {
   return out;
 }
 
-function curDoneForm(l) {
+function curDoneForm(l, c) {
   return `<div class="cur-form">
     <input id="cd-note" data-enter="cur-done-save" placeholder="한 줄 요약·감상 (선택)" maxlength="140" autocomplete="off" aria-label="한 줄 남기기">
-    <div class="cur-form-row"><label class="field inline"><span>걸린 시간</span><input id="cd-min" type="number" min="0" max="600" inputmode="numeric" value="${l.min || 30}" data-enter="cur-done-save"></label><span class="muted small">분</span>
+    <div class="cur-form-row"><label class="field inline"><span>걸린 시간</span><input id="cd-min" type="number" min="0" max="600" inputmode="numeric" value="${l.min || Number(c?.lmin) || 30}" data-enter="cur-done-save"></label><span class="muted small">분</span>
       <span class="btn-row tight"><button type="button" class="btn sm primary" data-action="cur-done-save">끝냄</button><button type="button" class="btn sm" data-action="cur-done-cancel">취소</button></span></div>
   </div>`;
 }
 const isDoneOpen = (cid, lid) => ui.curDone?.cid === cid && ui.curDone?.lid === lid;
+const lessonMeta = (l, I) => [l.min ? fmtDur(l.min) : '', l.opt ? '선택' : '', l.date && !l.done ? `📅 ${fmtMD(l.date)}` : '', l.done ? `${fmtMD(l.done)} 끝냄` : '', l.skip && !l.done ? '건너뜀' : '', I && I.next?.id === l.id ? '다음 레슨' : ''].filter(Boolean).join(' · ');
 
-// 오늘 화면: 커리큘럼마다 다음 레슨(+ 오늘로 잡아 둔 레슨)
+// 오늘 화면: 커리큘럼마다 다음 레슨(+ 오늘로 잡아 둔 레슨). 이름을 누르면 레슨 설명을 엶
 function curTodayCard(date) {
   if (date !== todayStr()) return '';
   const cs = curActive().filter(inFilter);
   if (!cs.length) return '';
   const lessonRow = (c, I, x, dated) => {
     const task = curTaskOf(date, x.id), sec = I.secOf.get(x.id);
+    const sub = [x.min ? fmtDur(x.min) : '', x.opt ? '선택 레슨' : '', x.body ? '설명 보기 ›' : ''].filter(Boolean).join(' · ');
     return `<div class="ct-les">
-      <span class="ct-text"><small class="muted">${I.num.get(x.id)}번째${sec ? ` · ${esc(sec)}` : ''}${dated ? ' · 오늘로 잡아 둠' : ''}</small><b>${esc(x.text)}</b>${x.min || x.opt ? `<small class="muted">${[x.min ? fmtDur(x.min) : '', x.opt ? '선택 레슨' : ''].filter(Boolean).join(' · ')}</small>` : ''}${x.memo ? `<small class="ct-memo">${linkify(x.memo)}</small>` : ''}</span>
+      <span class="ct-text"><small class="muted">${I.num.get(x.id)}번째${sec ? ` · ${esc(sec)}` : ''}${dated ? ' · 오늘로 잡아 둠' : ''}</small>
+        <button type="button" class="ct-title" data-action="cur-lesson" data-c="${c.id}" data-l="${x.id}"><b>${esc(x.text)}</b>${sub ? `<small>${sub}</small>` : ''}</button>
+        ${x.memo ? `<small class="ct-memo">${linkify(x.memo)}</small>` : ''}</span>
       <span class="ct-acts">${task ? `<span class="muted small">${task.done ? '과제 끝냄' : '과제칸에 있음'}</span>` : `<button type="button" class="chip-btn" data-action="cur-task" data-c="${c.id}" data-l="${x.id}">과제로</button>`}${x.opt ? `<button type="button" class="chip-btn" data-action="cur-skip" data-c="${c.id}" data-l="${x.id}">건너뛰기</button>` : ''}<button type="button" class="chip-btn on" data-action="cur-done-open" data-c="${c.id}" data-l="${x.id}">✓ 끝냄</button></span>
-    </div>${isDoneOpen(c.id, x.id) ? curDoneForm(x) : ''}`;
+    </div>${isDoneOpen(c.id, x.id) ? curDoneForm(x, c) : ''}`;
   };
   const rows = cs.map(c => {
     const I = curInfo(c), ai = areaInfo(c.area), n = I.next;
@@ -1944,7 +1959,7 @@ function curTodayCard(date) {
 function curTemplateCard() {
   return `<article class="card">
     <div class="card-head"><h2>AI에게 짜 달라고 할 때</h2></div>
-    <p class="muted small">템플릿을 복사해 빈칸(배우려는 것, 지금 수준, 쓸 수 있는 시간)을 채운 뒤 AI에게 보내고, 받은 결과를 '새 커리큘럼'의 붙여 넣기 칸에 그대로 넣으세요. 형식이 조금 달라도 '#' 제목·'##' 단원·'-' 목록 줄을 기준으로 읽고, 시간(25분, 1시간)은 알아서 찾습니다. 레슨을 작게 나누고 밀린 것을 몰아서 하는 구조를 피하라는 요청도 들어 있습니다.</p>
+    <p class="muted small">템플릿을 복사해 빈칸(배우려는 것, 지금 수준, 쓸 수 있는 시간)을 채워 AI에게 보내고, 받은 결과를 '새 커리큘럼'의 붙여 넣기 칸에 그대로 넣으세요. 첫 단원 전의 글은 '안내'로, '### 1. 레슨' 같은 번호 붙은 제목은 레슨으로, 그 아래 글은 레슨 설명으로 들어갑니다. 이미 만들어 둔 문서('## 순번 1 · …' 식)도 번호 붙은 제목을 레슨으로 알아보고, 진행 기록용 체크 목록은 앱이 대신 기록하므로 뺍니다. 레슨을 작게 나누고 밀린 것을 몰아서 하는 구조를 피하라는 요청도 들어 있습니다.</p>
     <div class="btn-row"><button type="button" class="btn" data-action="cur-tpl">템플릿 복사</button><button type="button" class="link-btn" data-action="cur-tpl-show">${ui.curTpl ? '접기' : '내용 보기'}</button></div>
     ${ui.curTpl ? `<textarea class="code-box" rows="14" readonly aria-label="커리큘럼 템플릿">${esc(CUR_TEMPLATE)}</textarea>` : ''}
   </article>`;
@@ -1959,7 +1974,7 @@ function curNewForm() {
         <label class="field"><span>영역</span><select id="nc-area">${areaOptions(defaultArea())}</select></label>
         <label class="field"><span>속도</span><select id="nc-pace">${paceOptions(3)}</select></label>
       </div>
-      <label class="field"><span>레슨 목록 붙여 넣기 (선택)</span><textarea id="nc-text" rows="8" placeholder="# 화성학 기초&#10;## 1단원 소리의 재료&#10;- 장음계와 반음 위치 | 25분 | 건반으로 쳐 보기&#10;- (선택) 음정 이름 외우기 | 15분"></textarea></label>
+      <label class="field"><span>커리큘럼 글 붙여 넣기 (선택)</span><textarea id="nc-text" rows="9" placeholder="# 화성학 기초&#10;안내: 이 커리큘럼을 쓰는 방법…&#10;## 1단원 소리의 재료&#10;### 1. 장음계와 반음 위치 | 15분&#10;레슨 설명…"></textarea></label>
       <p class="muted small">비워 두고 만든 뒤 레슨을 하나씩 더해도 됩니다. 속도는 '이번 주 몇 개'와 예상 완료일을 보여 주는 데만 쓰고, 못 채워도 밀린 레슨이 쌓이지 않습니다.</p>
     </div>
     <div class="btn-row"><button type="button" class="btn primary" data-action="cur-create">만들기</button><button type="button" class="btn" data-action="cur-new-cancel">취소</button></div>
@@ -1978,36 +1993,67 @@ function curCard(c) {
   </article>`;
 }
 
+// 레슨 목록 한 줄: 번호를 누르면 끝냄, 이름을 누르면 레슨(설명) 화면. 단원 줄은 눌러서 단원 안내·고치기
 function curLessonRow(c, I, l, idx, len) {
-  const open = ui.curOpen === l.id, k = `cu|${l.id}`;
-  const move = `<button type="button" class="icon-btn sm" data-action="cur-les-move" data-c="${c.id}" data-l="${l.id}" data-dir="-1" ${idx === 0 ? 'disabled' : ''} aria-label="위로">↑</button><button type="button" class="icon-btn sm" data-action="cur-les-move" data-c="${c.id}" data-l="${l.id}" data-dir="1" ${idx === len - 1 ? 'disabled' : ''} aria-label="아래로">↓</button>`;
-  const del = `<button type="button" class="btn sm danger" data-action="cur-les-del" data-c="${c.id}" data-l="${l.id}">지우기</button>`;
+  const k = `cu|${l.id}`;
   if (l.h) {
-    return `<li class="cu-sec ${open ? 'open' : ''}"><button type="button" class="cu-sec-head" data-action="cur-les-open" data-l="${l.id}" aria-expanded="${open}">${esc(l.text)}</button>
-      ${open ? `<div class="cu-edit"><input data-cles="text" data-c="${c.id}" data-l="${l.id}" data-key="${k}|text" value="${esc(l.text)}" maxlength="80" aria-label="단원 이름"><div class="btn-row tight">${move}${del}</div></div>` : ''}</li>`;
+    const open = ui.curOpen === l.id, edit = ui.curEdit === l.id;
+    return `<li class="cu-sec ${open ? 'open' : ''}"><button type="button" class="cu-sec-head" data-action="cur-les-open" data-l="${l.id}" aria-expanded="${open}"><span>${esc(l.text)}</span>${l.body ? `<small>${open ? '접기' : '단원 안내'}</small>` : ''}</button>
+      ${open && l.body && !edit ? `<div class="md cu-sec-body">${renderMd(l.body)}</div>` : ''}
+      ${open ? (edit ? `<div class="cu-edit">
+        <input data-cles="text" data-c="${c.id}" data-l="${l.id}" data-key="${k}|text" value="${esc(l.text)}" maxlength="80" aria-label="단원 이름">
+        <textarea data-cles="body" data-c="${c.id}" data-l="${l.id}" data-key="${k}|body" rows="5" placeholder="단원 안내 (선택)" aria-label="단원 안내">${esc(l.body || '')}</textarea>
+        <div class="btn-row tight">${curMoveBtns(c, l, idx, len)}<button type="button" class="btn sm" data-action="cur-edit" data-l="${l.id}">다 고침</button><button type="button" class="btn sm danger" data-action="cur-les-del" data-c="${c.id}" data-l="${l.id}">지우기</button></div>
+      </div>` : `<div class="btn-row tight cu-sec-acts"><button type="button" class="link-btn" data-action="cur-edit" data-l="${l.id}">고치기</button></div>`) : ''}</li>`;
   }
-  const isNext = I.next?.id === l.id;
-  const meta = [l.min ? fmtDur(l.min) : '', l.opt ? '선택' : '', l.date && !l.done ? `📅 ${fmtMD(l.date)}` : '', l.done ? `${fmtMD(l.done)} 끝냄` : '', l.skip && !l.done ? '건너뜀' : '', isNext ? '다음 레슨' : ''].filter(Boolean).join(' · ');
-  return `<li class="cu-les ${l.done ? 'done' : ''} ${l.skip && !l.done ? 'skip' : ''} ${isNext ? 'next' : ''} ${open ? 'open' : ''}">
+  const isNext = I.next?.id === l.id, meta = lessonMeta(l, I);
+  return `<li class="cu-les ${l.done ? 'done' : ''} ${l.skip && !l.done ? 'skip' : ''} ${isNext ? 'next' : ''}">
     <div class="cu-row">
-      <button type="button" class="cu-mark" data-action="${l.done ? 'cur-les-open' : 'cur-done-open'}" data-c="${c.id}" data-l="${l.id}" aria-label="${l.done ? '끝낸 레슨' : `${esc(l.text)} 끝냄으로 표시`}">${l.done ? '✓' : l.skip ? '–' : I.num.get(l.id)}</button>
-      <button type="button" class="cu-body" data-action="cur-les-open" data-l="${l.id}" aria-expanded="${open}"><b>${esc(l.text)}</b>${meta ? `<small>${meta}</small>` : ''}</button>
+      <button type="button" class="cu-mark" data-action="${l.done ? 'cur-lesson' : 'cur-done-open'}" data-c="${c.id}" data-l="${l.id}" aria-label="${l.done ? `${esc(l.text)} 열기` : `${esc(l.text)} 끝냄으로 표시`}">${l.done ? '✓' : l.skip ? '–' : I.num.get(l.id)}</button>
+      <button type="button" class="cu-body" data-action="cur-lesson" data-c="${c.id}" data-l="${l.id}"><b>${esc(l.text)}</b>${meta || l.body ? `<small>${[meta, l.body ? '설명 ›' : ''].filter(Boolean).join(' · ')}</small>` : ''}</button>
     </div>
     ${l.note ? `<p class="cu-note">“${esc(l.note)}”</p>` : ''}
-    ${l.memo && !open ? `<p class="cu-memo">${linkify(l.memo)}</p>` : ''}
-    ${isDoneOpen(c.id, l.id) && ui.curDone.at !== 'sum' ? curDoneForm(l) : ''}
-    ${open ? `<div class="cu-edit">
-      <input data-cles="text" data-c="${c.id}" data-l="${l.id}" data-key="${k}|text" value="${esc(l.text)}" maxlength="120" aria-label="레슨 이름">
-      <div class="cu-edit-row"><label class="field inline"><span>예상</span><input type="number" min="0" max="600" inputmode="numeric" data-cles="min" data-c="${c.id}" data-l="${l.id}" data-key="${k}|min" value="${l.min || ''}" aria-label="예상 분"></label><span class="muted small">분</span>
-        <label class="field inline"><span>날짜</span><input type="date" data-cles="date" data-c="${c.id}" data-l="${l.id}" value="${esc(l.date || '')}" aria-label="잡아 둘 날짜 (선택)"></label></div>
-      <input data-cles="memo" data-c="${c.id}" data-l="${l.id}" data-key="${k}|memo" value="${esc(l.memo || '')}" placeholder="메모·링크" maxlength="300" aria-label="메모">
-      ${l.done ? `<input data-cles="note" data-c="${c.id}" data-l="${l.id}" data-key="${k}|note" value="${esc(l.note || '')}" placeholder="한 줄 요약·감상" maxlength="140" aria-label="한 줄 남김">` : ''}
-      <label class="check"><input type="checkbox" data-cles="opt" data-c="${c.id}" data-l="${l.id}" ${l.opt ? 'checked' : ''}><span>선택 레슨 (건너뛰어도 되는 것)</span></label>
-      <div class="btn-row tight">${move}
-        ${l.done ? `<button type="button" class="btn sm" data-action="cur-undo" data-c="${c.id}" data-l="${l.id}">끝냄 취소</button>` : `<button type="button" class="btn sm" data-action="cur-task" data-c="${c.id}" data-l="${l.id}">오늘 과제로</button><button type="button" class="btn sm" data-action="cur-skip" data-c="${c.id}" data-l="${l.id}">${l.skip ? '건너뜀 취소' : '건너뛰기'}</button>`}
-        ${del}</div>
-    </div>` : ''}
+    ${l.memo ? `<p class="cu-memo">${linkify(l.memo)}</p>` : ''}
+    ${isDoneOpen(c.id, l.id) && ui.curDone.at !== 'sum' ? curDoneForm(l, c) : ''}
   </li>`;
+}
+const curMoveBtns = (c, l, idx, len) => `<button type="button" class="icon-btn sm" data-action="cur-les-move" data-c="${c.id}" data-l="${l.id}" data-dir="-1" ${idx === 0 ? 'disabled' : ''} aria-label="위로">↑</button><button type="button" class="icon-btn sm" data-action="cur-les-move" data-c="${c.id}" data-l="${l.id}" data-dir="1" ${idx === len - 1 ? 'disabled' : ''} aria-label="아래로">↓</button>`;
+
+// 레슨 화면: 설명(본문)을 읽고 그 자리에서 끝냄·과제로 올리기·고치기, 앞뒤 레슨으로 이동
+function curLessonPage(c, I, l) {
+  const ai = areaInfo(c.area), idx = I.ls.findIndex(x => x.id === l.id), prev = I.ls[idx - 1], next = I.ls[idx + 1];
+  const pos = I.all.findIndex(x => x.id === l.id), sec = I.secOf.get(l.id), edit = ui.curEdit === l.id, k = `cu|${l.id}`, task = curTaskOf(todayStr(), l.id);
+  const meta = lessonMeta(l, I);
+  const status = l.done
+    ? `<div class="cur-done-info"><b>✓ ${fmtMD(l.done)} 끝냄</b>${l.note ? `<p class="cu-note">“${esc(l.note)}”</p>` : ''}
+        <input data-cles="note" data-c="${c.id}" data-l="${l.id}" data-key="${k}|note" value="${esc(l.note || '')}" placeholder="한 줄 요약·감상" maxlength="140" aria-label="한 줄 남김">
+        <div class="btn-row tight"><button type="button" class="btn sm" data-action="cur-undo" data-c="${c.id}" data-l="${l.id}">끝냄 취소</button></div></div>`
+    : `<div class="btn-row cur-page-acts"><button type="button" class="btn primary" data-action="cur-done-open" data-c="${c.id}" data-l="${l.id}" data-at="page">✓ 끝냄</button>${task ? `<span class="muted small">${task.done ? '과제 끝냄' : '오늘 과제칸에 있음'}</span>` : `<button type="button" class="btn" data-action="cur-task" data-c="${c.id}" data-l="${l.id}">오늘 과제로</button>`}<button type="button" class="btn" data-action="cur-skip" data-c="${c.id}" data-l="${l.id}">${l.skip ? '건너뜀 취소' : '건너뛰기'}</button></div>
+      ${isDoneOpen(c.id, l.id) ? curDoneForm(l, c) : ''}`;
+  const editor = edit ? `<article class="card"><div class="card-head"><h2>레슨 고치기</h2><button type="button" class="link-btn" data-action="cur-edit" data-l="${l.id}">다 고침</button></div>
+      <div class="cu-edit page">
+        <label class="field"><span>이름</span><input data-cles="text" data-c="${c.id}" data-l="${l.id}" data-key="${k}|text" value="${esc(l.text)}" maxlength="120"></label>
+        <div class="cu-edit-row"><label class="field inline"><span>예상</span><input type="number" min="0" max="600" inputmode="numeric" data-cles="min" data-c="${c.id}" data-l="${l.id}" data-key="${k}|min" value="${l.min || ''}" aria-label="예상 분"></label><span class="muted small">분</span>
+          <label class="field inline"><span>날짜</span><input type="date" data-cles="date" data-c="${c.id}" data-l="${l.id}" value="${esc(l.date || '')}" aria-label="잡아 둘 날짜 (선택)"></label></div>
+        <label class="field"><span>메모·링크 (한 줄)</span><input data-cles="memo" data-c="${c.id}" data-l="${l.id}" data-key="${k}|memo" value="${esc(l.memo || '')}" maxlength="300"></label>
+        <label class="field"><span>설명 (마크다운: # 소제목, - 목록, **굵게**, 표)</span><textarea data-cles="body" data-c="${c.id}" data-l="${l.id}" data-key="${k}|body" rows="14" aria-label="레슨 설명">${esc(l.body || '')}</textarea></label>
+        <label class="check"><input type="checkbox" data-cles="opt" data-c="${c.id}" data-l="${l.id}" ${l.opt ? 'checked' : ''}><span>선택 레슨 (건너뛰어도 되는 것)</span></label>
+        <div class="btn-row tight">${curMoveBtns(c, l, pos, I.all.length)}<button type="button" class="btn sm danger" data-action="cur-les-del" data-c="${c.id}" data-l="${l.id}">레슨 지우기</button></div>
+      </div></article>`
+    : '';
+  const nav = `<nav class="cur-pager">${prev ? `<button type="button" class="btn" data-action="cur-lesson" data-c="${c.id}" data-l="${prev.id}">‹ ${I.num.get(prev.id)}. ${esc(prev.text)}</button>` : '<span></span>'}${next ? `<button type="button" class="btn" data-action="cur-lesson" data-c="${c.id}" data-l="${next.id}">${I.num.get(next.id)}. ${esc(next.text)} ›</button>` : '<span></span>'}</nav>`;
+  return layoutView([
+    [`<header class="vhead plain cur-vhead"><button type="button" class="icon-btn" data-action="cur-lesson-close" aria-label="${esc(c.name)}(으)로">‹</button>
+      <div class="vtitle"><h1>${I.num.get(l.id)}. ${esc(l.text)}</h1><span class="sub">${esc(ai.emoji)} ${esc(c.name)}${sec ? ` · ${esc(sec)}` : ''}${meta ? ` · ${meta}` : ''}</span></div></header>`, 'full'],
+    [`<article class="card cur-lesson" style="--ac:${ai.color}">
+      ${l.body ? `<div class="md">${renderMd(l.body)}</div>` : `<p class="muted">설명이 아직 없습니다. '고치기'에서 이 레슨에서 할 것과 끝난 기준을 적거나, 공부하면서 받은 설명을 붙여 넣어 두세요.</p>`}
+      ${l.memo ? `<p class="cu-memo">${linkify(l.memo)}</p>` : ''}
+    </article>`, 'main'],
+    [`<article class="card cur-status" style="--ac:${ai.color}">${status}
+      ${edit ? '' : `<div class="btn-row tight"><button type="button" class="link-btn" data-action="cur-edit" data-l="${l.id}">고치기</button></div>`}</article>`, 'side'],
+    [editor, 'side'],
+    [nav, 'main'],
+  ], 'cur-view cur-page');
 }
 
 function curDetail(c) {
@@ -2018,24 +2064,32 @@ function curDetail(c) {
     [`<article class="card cur-sum" style="--ac:${ai.color}">
       <div class="cur-sum-top"><b>${I.done}<small>/${I.base}</small></b><span class="muted small">끝낸 레슨${I.skipped ? ` · 건너뜀 ${I.skipped}` : ''}${I.pace ? `<br>이번 주 ${I.week}/${I.pace}${I.eta ? ` · 이 속도면 ${fmtMD(I.eta)}쯤 끝` : ''}` : ''}</span></div>
       <div class="bar"><i style="width:${I.pct}%"></i></div>
-      ${n ? `<div class="cur-next"><span><small class="muted">다음 레슨</small><b>${I.num.get(n.id)}. ${esc(n.text)}</b></span><span class="btn-row tight">${curTaskOf(todayStr(), n.id) ? '<span class="muted small">과제칸에 있음</span>' : `<button type="button" class="chip-btn" data-action="cur-task" data-c="${c.id}" data-l="${n.id}">오늘 과제로</button>`}<button type="button" class="chip-btn on" data-action="cur-done-open" data-c="${c.id}" data-l="${n.id}" data-at="sum">✓ 끝냄</button></span></div>
-        ${isDoneOpen(c.id, n.id) && ui.curDone.at === 'sum' ? curDoneForm(n) : ''}` : ''}
+      ${n ? `<div class="cur-next"><button type="button" class="cur-next-title" data-action="cur-lesson" data-c="${c.id}" data-l="${n.id}"><small class="muted">다음 레슨${n.body ? ' · 설명 보기 ›' : ''}</small><b>${I.num.get(n.id)}. ${esc(n.text)}</b></button><span class="btn-row tight">${curTaskOf(todayStr(), n.id) ? '<span class="muted small">과제칸에 있음</span>' : `<button type="button" class="chip-btn" data-action="cur-task" data-c="${c.id}" data-l="${n.id}">오늘 과제로</button>`}<button type="button" class="chip-btn on" data-action="cur-done-open" data-c="${c.id}" data-l="${n.id}" data-at="sum">✓ 끝냄</button></span></div>
+        ${isDoneOpen(c.id, n.id) && ui.curDone.at === 'sum' ? curDoneForm(n, c) : ''}` : ''}
     </article>`, 'main'],
+    [c.guide ? `<article class="card cur-guide">
+      <div class="card-head"><h2>안내</h2><button type="button" class="link-btn" data-action="cur-guide">${ui.curGuide ? '접기' : '펼치기'}</button></div>
+      ${ui.curGuide ? `<div class="md">${renderMd(c.guide)}</div><div class="btn-row tight"><button type="button" class="link-btn" data-action="cur-guide">안내 접기</button></div>` : `<p class="muted small cur-guide-pre">${esc(plainPreview(c.guide, 140))}</p>`}
+    </article>` : '', 'main'],
     [`<article class="card">
-      <div class="card-head"><h2>레슨</h2><span class="muted small">번호를 누르면 끝냄, 이름을 누르면 고치기</span></div>
-      ${I.all.length ? `<ol class="cu-list">${I.all.map((l, i) => curLessonRow(c, I, l, i, I.all.length)).join('')}</ol>` : '<p class="muted small">아래에서 레슨을 더하거나, 계획 글을 붙여 넣어 한 번에 넣으세요.</p>'}
+      <div class="card-head"><h2>레슨</h2><span class="muted small">번호를 누르면 끝냄, 이름을 누르면 레슨 화면</span></div>
+      ${I.all.length ? `<ol class="cu-list">${I.all.map((l, i) => curLessonRow(c, I, l, i, I.all.length)).join('')}</ol>` : '<p class="muted small">아래에서 레슨을 더하거나, 커리큘럼 글을 붙여 넣어 한 번에 넣으세요.</p>'}
       <div class="add-row cu-add"><input id="cu-new" data-enter="cur-les-add" placeholder="레슨 이름" maxlength="120" autocomplete="off" aria-label="새 레슨 이름"><input id="cu-new-min" type="number" min="0" max="600" inputmode="numeric" placeholder="분" data-enter="cur-les-add" aria-label="예상 분"><button type="button" class="btn" data-action="cur-les-add">추가</button></div>
       <div class="btn-row tight"><button type="button" class="link-btn" data-action="cur-sec-add">+ 칸의 글자로 단원 제목 넣기</button><button type="button" class="link-btn" data-action="cur-paste-open">${ui.curPaste ? '붙여 넣기 접기' : '붙여 넣어 여러 개 넣기'}</button></div>
-      ${ui.curPaste ? `<textarea id="cp-text" rows="7" placeholder="## 2단원&#10;- 레슨 이름 | 30분 | 메모"></textarea><div class="btn-row tight"><button type="button" class="btn sm primary" data-action="cur-paste-add">끝에 넣기</button></div>` : ''}
+      ${ui.curPaste ? `<textarea id="cp-text" rows="7" placeholder="## 2단원&#10;### 7. 레슨 이름 | 30분&#10;레슨 설명…"></textarea><div class="btn-row tight"><button type="button" class="btn sm primary" data-action="cur-paste-add">끝에 넣기</button></div>` : ''}
     </article>`, 'main'],
     [`<article class="card">
       <div class="card-head"><h2>설정</h2></div>
       <div class="fields">
         <label class="field"><span>이름</span><input data-cur="name" data-key="cur|${c.id}|name" value="${esc(c.name)}" maxlength="80"></label>
         <label class="field"><span>영역</span><select data-cur="area">${areaOptions(c.area)}</select></label>
-        <label class="field"><span>속도</span><select data-cur="pace">${paceOptions(c.pace || 0)}</select></label>
+        <div class="field-row">
+          <label class="field"><span>속도</span><select data-cur="pace">${paceOptions(c.pace || 0)}</select></label>
+          <label class="field"><span>레슨 기본 시간 (분)</span><input type="number" min="0" max="600" inputmode="numeric" data-cur="lmin" data-key="cur|${c.id}|lmin" value="${Number(c.lmin) || ''}" placeholder="30"></label>
+        </div>
+        ${ui.curGuideEdit ? `<label class="field"><span>안내 (마크다운)</span><textarea data-cur="guide" data-key="cur|${c.id}|guide" rows="12">${esc(c.guide || '')}</textarea></label>` : ''}
       </div>
-      <div class="btn-row"><button type="button" class="btn" data-action="cur-archive" data-id="${c.id}">${c.archived ? '보관함에서 꺼내기' : '보관하기'}</button><button type="button" class="btn danger" data-action="cur-del" data-id="${c.id}">지우기</button></div>
+      <div class="btn-row"><button type="button" class="btn" data-action="cur-guide-edit">${ui.curGuideEdit ? '안내 고치기 닫기' : c.guide ? '안내 고치기' : '안내 쓰기'}</button><button type="button" class="btn" data-action="cur-archive" data-id="${c.id}">${c.archived ? '보관함에서 꺼내기' : '보관하기'}</button><button type="button" class="btn danger" data-action="cur-del" data-id="${c.id}">지우기</button></div>
     </article>`, 'side'],
     [curTemplateCard(), 'side'],
   ], 'cur-view');
@@ -2043,6 +2097,10 @@ function curDetail(c) {
 
 function viewCurricula() {
   const c = curOf(ui.curId);
+  if (c && ui.curLesson) {
+    const I = curInfo(c), l = I.ls.find(x => x.id === ui.curLesson);
+    if (l) return curLessonPage(c, I, l);
+  }
   if (c) return curDetail(c);
   const all = curList().filter(inFilter), active = all.filter(x => !x.archived), arch = all.filter(x => x.archived);
   return `<section class="view">
@@ -2052,7 +2110,7 @@ function viewCurricula() {
     </header>
     ${areaFilterBar()}
     ${ui.curNew ? curNewForm() : ''}
-    ${active.length ? `<div class="proj-grid">${active.map(curCard).join('')}</div>` : ui.curNew ? '' : `<article class="card"><p class="muted">${areaFilter() ? '이 영역에 커리큘럼이 없습니다.' : '아직 커리큘럼이 없습니다.'} 화성학·드럼 루디먼트·그림 기초처럼 순서가 있는 공부를 레슨으로 나눠 두면, 오늘 화면과 활동 시간 칸에 다음 레슨이 뜨고 끝낼 때마다 기록에 들어갑니다.</p></article>`}
+    ${active.length ? `<div class="proj-grid">${active.map(curCard).join('')}</div>` : ui.curNew ? '' : `<article class="card"><p class="muted">${areaFilter() ? '이 영역에 커리큘럼이 없습니다.' : '아직 커리큘럼이 없습니다.'} 화성학·드럼 루디먼트·그림 기초처럼 순서가 있는 공부를 안내·단원·레슨(설명 포함)으로 넣어 두면, 오늘 화면과 활동 시간 칸에 다음 레슨이 뜨고 레슨을 열어 설명을 보며 진행할 수 있습니다.</p></article>`}
     ${curTemplateCard()}
     ${arch.length ? `<button type="button" class="link-btn" data-action="cur-arch-toggle">${ui.curShowArch ? '보관함 접기' : `보관된 커리큘럼 ${arch.length}개 보기`}</button>
       ${ui.curShowArch ? `<div class="proj-grid">${arch.map(curCard).join('')}</div>` : ''}` : ''}
@@ -2986,7 +3044,7 @@ const actions = {
     if (v === 'day') ui.day = t;
     if (v === 'week') ui.week = weekStart(t);
     if (v === 'month') ui.month = t.slice(0, 7);
-    if (v === 'curriculum' && ui.view === 'curriculum') ui.curId = null; // 커리큘럼 탭을 한 번 더 누르면 목록으로
+    if (v === 'curriculum' && ui.view === 'curriculum') { if (ui.curLesson) ui.curLesson = null; else ui.curId = null; } // 탭을 한 번 더 누르면 한 칸 위로
     ui.view = v; render(); scrollTop();
   },
   'day-prev'() { ui.day = addDays(ui.day, -1); render(); },
@@ -3281,15 +3339,19 @@ const actions = {
     const area = inVal('nc-area') || defaultArea(), id = uid();
     const list = parsed.items.map(x => ({ id: uid(), ...x }));
     const tm = list.length ? mapPatch(null, list) : null;
-    store.patch('curricula', id, { name, area, pace: Number(inVal('nc-pace')) || 0, created: Date.now(), ...(tm ? { lessons: tm } : {}) });
+    store.patch('curricula', id, { name, area, pace: Number(inVal('nc-pace')) || 0, created: Date.now(), ...(parsed.guide ? { guide: parsed.guide } : {}), ...(tm ? { lessons: tm } : {}) });
     lsSet(LA_KEY, area);
-    ui.curNew = false; ui.curId = id; ui.curOpen = null;
-    const nl = list.filter(x => !x.h).length, ns = list.length - nl;
+    ui.curNew = false; ui.curId = id; ui.curLesson = null; ui.curOpen = null; ui.curGuide = false;
     render(); scrollTop();
-    toast(nl ? `레슨 ${nl}개${ns ? `(단원 ${ns}개)` : ''}를 넣었습니다.` : '커리큘럼을 만들었습니다. 레슨을 더해 주세요.');
+    toast(curImportMsg(list, parsed) || '커리큘럼을 만들었습니다. 레슨을 더해 주세요.');
   },
-  'cur-open'(el) { ui.view = 'curriculum'; ui.curId = el.dataset.id; ui.curOpen = null; ui.curPaste = false; render(); scrollTop(); },
-  'cur-back'() { ui.curId = null; ui.curOpen = null; ui.curDone = null; render(); scrollTop(); },
+  'cur-open'(el) { ui.view = 'curriculum'; ui.curId = el.dataset.id; ui.curLesson = null; ui.curOpen = null; ui.curEdit = null; ui.curPaste = false; ui.curGuide = false; ui.curGuideEdit = false; render(); scrollTop(); },
+  'cur-back'() { ui.curId = null; ui.curLesson = null; ui.curOpen = null; ui.curDone = null; render(); scrollTop(); },
+  'cur-lesson'(el) { ui.view = 'curriculum'; ui.curId = el.dataset.c; ui.curLesson = el.dataset.l; ui.curEdit = null; ui.curDone = null; render(); scrollTop(); },
+  'cur-lesson-close'() { ui.curLesson = null; ui.curEdit = null; ui.curDone = null; render(); scrollTop(); },
+  'cur-edit'(el) { ui.curEdit = ui.curEdit === el.dataset.l ? null : el.dataset.l; render(); },
+  'cur-guide'() { ui.curGuide = !ui.curGuide; render(); if (!ui.curGuide) document.querySelector('.cur-guide')?.scrollIntoView({ block: 'nearest' }); },
+  'cur-guide-edit'() { ui.curGuideEdit = !ui.curGuideEdit; render(); },
   'cur-arch-toggle'() { ui.curShowArch = !ui.curShowArch; render(); },
   async 'cur-tpl'() {
     try { await navigator.clipboard.writeText(CUR_TEMPLATE); toast('템플릿을 복사했습니다. 빈칸을 채워 AI에게 보내 주세요.'); }
@@ -3328,7 +3390,7 @@ const actions = {
     if (!x.skip) toast(`'${x.text}'을(를) 건너뛰었습니다. 레슨 목록에서 되살릴 수 있습니다.`);
   },
   'cur-undo'(el) { undoLesson(el.dataset.c, el.dataset.l); toast('끝냄을 취소했습니다. 그날 기록에서도 뺐습니다.'); },
-  'cur-les-open'(el) { ui.curOpen = ui.curOpen === el.dataset.l ? null : el.dataset.l; render(); },
+  'cur-les-open'(el) { ui.curOpen = ui.curOpen === el.dataset.l ? null : el.dataset.l; if (ui.curOpen !== ui.curEdit) ui.curEdit = null; render(); },
   'cur-les-move'(el) {
     const { c, l } = el.dataset, list = lessonsOf(curOf(c)), i = list.findIndex(x => x.id === l), j = i + Number(el.dataset.dir);
     if (i < 0 || j < 0 || j >= list.length) return;
@@ -3339,6 +3401,7 @@ const actions = {
     const { c, l } = el.dataset, list = lessonsOf(curOf(c)), x = list.find(y => y.id === l);
     if (!x || !confirm(x.h ? `단원 제목 '${x.text}'을(를) 지울까요? 그 안의 레슨은 남습니다.` : `레슨 '${x.text}'을(를) 지울까요?${x.done ? ' 이미 남긴 기록은 그대로 둡니다.' : ''}`)) return;
     if (ui.curOpen === l) ui.curOpen = null;
+    if (ui.curLesson === l) { ui.curLesson = null; ui.curEdit = null; }
     setLessons(c, list.filter(y => y.id !== l));
   },
   'cur-les-add'() {
@@ -3363,10 +3426,11 @@ const actions = {
     const c = curOf(ui.curId), parsed = parseCurriculum(document.getElementById('cp-text')?.value || '');
     if (!c) return;
     const items = parsed.items.map(x => ({ id: uid(), ...x }));
-    if (!items.length) { toast('넣을 레슨을 찾지 못했습니다. 한 줄에 레슨 하나씩 적어 주세요.'); return; }
+    if (!items.length && !parsed.guide) { toast('넣을 레슨을 찾지 못했습니다. 한 줄에 레슨 하나씩 적거나 번호 붙은 제목으로 적어 주세요.'); return; }
     ui.curPaste = false;
     setLessons(c.id, [...lessonsOf(c), ...items]);
-    toast(`레슨 ${items.filter(x => !x.h).length}개를 끝에 넣었습니다.`);
+    if (parsed.guide) store.patch('curricula', c.id, { guide: clipStr(c.guide ? `${c.guide}\n\n${parsed.guide}` : parsed.guide, 60000) });
+    toast(`끝에 ${curImportMsg(items, parsed)}`);
   },
   'cur-archive'(el) {
     const c = curOf(el.dataset.id);
@@ -3747,6 +3811,8 @@ $app.addEventListener('change', e => {
     if (f === 'name') { if (!v) { render(); return; } store.patch('curricula', c.id, { name: v.slice(0, 80) }); }
     else if (f === 'area') { store.patch('curricula', c.id, { area: v }); lsSet(LA_KEY, v); }
     else if (f === 'pace') store.patch('curricula', c.id, { pace: Number(v) || 0 });
+    else if (f === 'lmin') store.patch('curricula', c.id, { lmin: Math.max(0, Math.min(600, Math.round(Number(v) || 0))) });
+    else if (f === 'guide') store.patch('curricula', c.id, { guide: clipStr(v, 60000) });
     return;
   }
   if (el.dataset.cles) {
@@ -3755,6 +3821,7 @@ $app.addEventListener('change', e => {
     if (f === 'text' && !v) { render(); return; }
     if (f === 'min') v = Math.max(0, Math.min(600, Math.round(Number(v) || 0)));
     if (f === 'text') v = v.slice(0, 120);
+    if (f === 'body') v = clipStr(v, 20000);
     updLesson(c, l, { [f]: v });
     return;
   }

@@ -856,3 +856,53 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 .cu-edit .btn-row .btn { white-space: nowrap; }
 .add-row.cu-add input[type=number] { flex: 0 0 76px; width: 76px; min-width: 0; }
 textarea.code-box { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; margin-top: 8px; }
+
+/* ── 커리큘럼: 설명(마크다운)·레슨 화면 ── */
+.md { font-size: 15px; line-height: 1.7; overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 .7em; }
+.md .md-h { margin: 1.3em 0 .45em; line-height: 1.35; }
+.md h3.md-h { font-size: 19px; }
+.md h4.md-h { font-size: 17px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+.md h5.md-h { font-size: 15.5px; color: var(--accent); }
+.md h6.md-h { font-size: 14.5px; color: var(--muted); }
+.md ul, .md ol { margin: 0 0 .8em; padding-left: 1.35em; }
+.md ul { list-style: disc; }
+.md ol { list-style: decimal; }
+.md li > ul { list-style: circle; }
+.md li { margin: .15em 0; }
+.md li > ul, .md li > ol { margin: .2em 0 .2em; }
+.md blockquote { margin: 0 0 .8em; padding: 8px 12px; border-left: 3px solid var(--ac, var(--accent)); background: var(--surface-2); border-radius: 0 10px 10px 0; }
+.md blockquote p:last-child { margin: 0; }
+.md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; }
+.md pre { background: var(--surface-2); border-radius: 10px; padding: 10px 12px; overflow-x: auto; margin: 0 0 .8em; }
+.md pre code { background: none; padding: 0; font-size: 13px; white-space: pre; }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 1.2em 0; }
+.md a { color: var(--accent); }
+.md .md-table { overflow-x: auto; margin: 0 0 .9em; }
+.md table { border-collapse: collapse; font-size: 13.5px; min-width: 100%; }
+.md th, .md td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
+.md th { background: var(--surface-2); font-weight: 700; }
+.md .md-cb { color: var(--muted); }
+.cur-lesson { padding: 18px 18px 20px; }
+@media (min-width: 760px) { .cur-lesson { padding: 22px 26px 24px; } }
+.cur-page .vtitle h1 { font-size: 21px; line-height: 1.35; }
+.cur-status { display: flex; flex-direction: column; gap: 10px; }
+.cur-page-acts { flex-wrap: wrap; align-items: center; }
+.cur-done-info { display: flex; flex-direction: column; gap: 6px; }
+.cur-done-info .cu-note { margin: 0; }
+.cur-done-info input { min-height: 38px; padding: 6px 10px; font-size: 15px; }
+.cur-pager { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.cur-pager .btn { white-space: normal; text-align: left; font-size: 13.5px; line-height: 1.35; min-height: 48px; }
+.cur-pager .btn:last-child { text-align: right; }
+.cu-edit.page { padding-left: 0; }
+.cu-edit textarea { font-size: 14.5px; background: var(--surface); }
+.cu-sec-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.cu-sec-head small { font-weight: 600; color: var(--accent); font-size: 12px; }
+.cu-sec-body { background: var(--surface-2); border-radius: 10px; padding: 10px 12px; margin: 6px 0; font-size: 14px; }
+.cu-sec-acts { margin: 2px 0 4px; }
+.ct-title { border: 0; background: none; padding: 0; text-align: left; display: flex; flex-direction: column; color: inherit; }
+.ct-title small { font-size: 12px; color: var(--accent); font-weight: 600; }
+.cur-next-title { border: 0; background: none; padding: 0; text-align: left; display: flex; flex-direction: column; min-width: 0; color: inherit; }
+.cur-guide-pre { margin: 0; }
