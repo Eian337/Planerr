@@ -1,6 +1,7 @@
 // 학업 플래너 — 화면과 동작
 import { Store } from './store.js';
 import { tasksOf, taskPatch, isTask, listOfMap, mapPatch } from './tasks.js';
+import { bridgeCall, scriptCode, makeSecret } from './bridge.js';
 import { applyTheme, cachedTheme, cacheTheme, fillTheme, PRESETS, COLOR_DEFS, COLOR_KEYS, rgb } from './theme.js';
 import { Player, cacheGet, cachePut, cacheDelete, cacheIds, legacyTracks, legacyClear } from './music.js';
 import { ensureFolder, uploadFile, downloadFile, deleteFile } from './drive.js';
@@ -10,7 +11,7 @@ import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timeta
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.13.0';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -61,6 +62,7 @@ const ui = {
   themeDraft: null,
   restore: null,     // 백업에서 되살리기: 비교 결과
   pinView: null,     // 오늘 화면에서 상시 과제칸을 보여 주는 중이면 { until }
+  bridgeShow: false, // 캘린더 상시 연결 코드를 펼쳐 보여 줄지
   timerTab: (() => { try { return localStorage.getItem('planner.timertab.v1') === 'alarm' ? 'alarm' : 'study'; } catch { return 'study'; } })(),
 };
 
@@ -634,8 +636,11 @@ async function syncWakeLock() {
 /* 구글 캘린더 */
 const gcal = new GCal({ clientId: CFG.googleClientId || '' });
 const calMeta = () => store.data.meta.calendar || {};
-const calConnected = () => gcal.available && !!calMeta().calendarId;
-let calBusy = false, calAutoTimer = 0;
+// 상시 연결(Apps Script 다리): 주소가 저장돼 있으면 연결 확인을 마친 것. 이때는 구글 로그인 권한 없이 반영됨
+const bridge = () => { const m = calMeta(); return m.bridgeUrl && m.bridgeSecret ? { url: m.bridgeUrl, secret: m.bridgeSecret } : null; };
+const calConnected = () => !!calMeta().calendarId && (!!bridge() || gcal.available);
+const calCanSend = () => !!bridge() || gcal.hasScope(CAL_SCOPE); // 지금 사용자 동작 없이 보낼 수 있는지
+let calBusy = false, calAutoTimer = 0, calError = '';
 
 function calDesired() {
   return alarmSchedule().map(it => {
@@ -671,7 +676,37 @@ function calPending() {
   return n;
 }
 
+const calFrom = () => new Date(atTime(addDays(todayStr(), -1), '00:00'));
+const calSyncedList = desired => desired.map(e => `${e.id}|${Date.parse(e.start.dateTime)}|${eventSig(e)}`);
+
+async function calSyncBridge({ interactive = false } = {}) {
+  if (calBusy) return;
+  if (!navigator.onLine) { if (interactive) toast('오프라인이라 캘린더에 보낼 수 없습니다. 연결되면 자동으로 보냅니다.'); return; }
+  calBusy = true;
+  scheduleRender();
+  try {
+    const b = bridge(), desired = calDesired();
+    const r = await bridgeCall(b.url, b.secret, 'sync', {
+      desired, calendarId: calMeta().calendarId || null, name: BASE_TITLE, timeZone: TZ,
+      from: calFrom().toISOString(), deviceId, activeTimerIds: [mt.calEventId, atm.calEventId].filter(Boolean),
+    });
+    store.set('meta', 'calendar', { calendarId: r.calendarId, synced: calSyncedList(desired), syncedAt: Date.now() });
+    calError = '';
+    if (mtRunning()) calTimerUpsert();
+    if (atRunning()) calTimerUpsert(atm);
+    if (interactive) toast(r.ops ? `캘린더에 ${r.ops}건 반영했습니다.` : '캘린더가 이미 최신 상태입니다.');
+  } catch (e) {
+    console.warn('캘린더 반영 실패(상시 연결)', e);
+    calError = e.message;
+    if (interactive || e.code === 'secret') toast(e.message);
+  } finally {
+    calBusy = false;
+    scheduleRender();
+  }
+}
+
 async function calSync({ interactive = false } = {}) {
+  if (bridge()) return calSyncBridge({ interactive });
   if (calBusy || !gcal.available || (!interactive && !calConnected())) return;
   if (!navigator.onLine) { if (interactive) toast('오프라인이라 캘린더에 보낼 수 없습니다. 연결되면 다시 눌러 주세요.'); return; }
   if (!gcal.hasScope(CAL_SCOPE) && !interactive) return;
@@ -683,7 +718,7 @@ async function calSync({ interactive = false } = {}) {
     const newCal = async () => { calId = await gcal.createCalendar(BASE_TITLE, TZ); store.set('meta', 'calendar', { calendarId: calId, synced: [] }); };
     if (!calId) await newCal();
     const desired = calDesired();
-    const opts = { from: new Date(atTime(addDays(todayStr(), -1), '00:00')), deviceId, activeTimerIds: [mt.calEventId, atm.calEventId].filter(Boolean) };
+    const opts = { from: calFrom(), deviceId, activeTimerIds: [mt.calEventId, atm.calEventId].filter(Boolean) };
     let ops;
     try { ops = await syncCalendar(gcal, calId, desired, opts); }
     catch (e) {
@@ -691,7 +726,7 @@ async function calSync({ interactive = false } = {}) {
       await newCal(); // 구글 캘린더에서 '학업 플래너' 캘린더를 지운 경우 새로 만듦
       ops = await syncCalendar(gcal, calId, desired, opts);
     }
-    store.set('meta', 'calendar', { calendarId: calId, synced: desired.map(e => `${e.id}|${Date.parse(e.start.dateTime)}|${eventSig(e)}`), syncedAt: Date.now() });
+    store.set('meta', 'calendar', { calendarId: calId, synced: calSyncedList(desired), syncedAt: Date.now() });
     if (mtRunning()) calTimerUpsert();
     if (atRunning()) calTimerUpsert(atm);
     if (interactive) toast(ops ? `캘린더에 ${ops}건 반영했습니다.` : '캘린더가 이미 최신 상태입니다.');
@@ -709,13 +744,16 @@ async function calSync({ interactive = false } = {}) {
 
 function scheduleCalAuto() {
   clearTimeout(calAutoTimer);
-  calAutoTimer = setTimeout(() => { if (calConnected() && gcal.hasScope(CAL_SCOPE) && navigator.onLine && calPending()) calSync(); }, 2500);
+  // 서버의 최신 내용을 받기 전에는 보내지 않음(예전 사본으로 캘린더를 고치지 않도록)
+  calAutoTimer = setTimeout(() => {
+    if (calConnected() && calCanSend() && navigator.onLine && store.isFresh('days', 'projects', 'meta') && calPending()) calSync();
+  }, 2500);
 }
 
 // 타이머 종료 시각도 캘린더에(권한이 살아 있고 온라인일 때만, 기기별). S: 공부 타이머(mt) 또는 알람 타이머(atm)
 function calTimerUpsert(S = mt) {
   const A = S === atm, run = A ? atRunning() : mtRunning();
-  if (!calConnected() || !gcal.hasScope(CAL_SCOPE) || !navigator.onLine || !run || !S.endTime) return;
+  if (!calConnected() || !calCanSend() || !navigator.onLine || !run || !S.endTime) return;
   const fresh = !S.calEventId;
   if (fresh) { S.calEventId = hexId(`${A ? 'ta' : 'tm'}|${deviceId}|${Date.now()}`); (A ? atSave : mtSave)(); }
   const base = eventsPath(calMeta().calendarId), st = S.endTime;
@@ -725,6 +763,12 @@ function calTimerUpsert(S = mt) {
     reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 0 }] },
     extendedProperties: { private: { planner: '1', kind: 'timer', device: deviceId } },
   };
+  const b = bridge();
+  if (b) {
+    bridgeCall(b.url, b.secret, 'put', { event: ev, calendarId: calMeta().calendarId, name: BASE_TITLE, timeZone: TZ })
+      .catch(e => console.warn('타이머 캘린더 알림 실패', e)).finally(() => scheduleRender());
+    return;
+  }
   (fresh ? insertEvent(gcal, base, ev) : gcal.api('PUT', `${base}/${ev.id}`, ev)
     .catch(e => (e.status === 404 ? insertEvent(gcal, base, ev) : Promise.reject(e))))
     .catch(e => console.warn('타이머 캘린더 알림 실패', e))
@@ -735,7 +779,9 @@ function calTimerRemove(S = mt) {
   if (!id) return;
   S.calEventId = null;
   (S === atm ? atSave : mtSave)();
-  if (!calConnected() || !gcal.hasScope(CAL_SCOPE) || !navigator.onLine) return; // 못 지우면 다음 반영 때 정리됨
+  if (!calConnected() || !calCanSend() || !navigator.onLine) return; // 못 지우면 다음 반영 때 정리됨
+  const b = bridge();
+  if (b) { bridgeCall(b.url, b.secret, 'del', { id, calendarId: calMeta().calendarId, name: BASE_TITLE, timeZone: TZ }).catch(() => {}); return; }
   gcal.api('DELETE', `${eventsPath(calMeta().calendarId)}/${id}`).catch(() => {});
 }
 
@@ -2002,21 +2048,50 @@ function alarmCard() {
   </article>`;
 }
 
+// 상시 연결(Apps Script) 설정 안내
+function bridgeSetup() {
+  const m = calMeta(), secret = m.bridgeSecret;
+  return `<div class="bridge">
+    <h3>상시 연결 <small class="muted">권장</small></h3>
+    <p class="muted small">브라우저가 받는 구글 권한은 1시간 정도면 만료돼서 다시 눌러야 합니다. 개인 구글 계정에 Apps Script를 한 번 만들어 두면, 그 스크립트가 계정 권한으로 대신 반영해서 어느 기기에서든 로그인 없이 자동으로 맞춰집니다. 처음 설정은 키보드가 있는 크롬북에서 하는 것이 편합니다.</p>
+    <ol class="bridge-steps">
+      <li><button class="btn sm" data-action="bridge-copy">코드 복사</button> <span class="muted small">비밀 값이 들어 있으니 다른 사람에게 보여 주지 마세요.</span></li>
+      <li><a href="https://script.google.com/home/projects/create" target="_blank" rel="noopener">script.google.com에서 새 프로젝트</a>를 열고, 원래 있던 내용을 모두 지운 뒤 붙여 넣고 저장(💾)합니다.</li>
+      <li>위쪽 함수 목록에서 <b>setup</b>을 고르고 <b>실행</b> → 권한 검토 → 계정 선택 → '고급' → '…(으)로 이동(안전하지 않음)' → 허용. 직접 만든 스크립트라 확인되지 않은 앱으로 표시됩니다.</li>
+      <li><b>배포 → 새 배포</b> → 유형 선택(톱니)에서 <b>웹 앱</b> → 다음 사용자 인증 정보로 실행: <b>나</b>, 액세스 권한이 있는 사용자: <b>모든 사용자</b> → 배포 → 나온 <b>웹 앱 URL</b>을 복사합니다.</li>
+      <li>아래 칸에 붙여 넣고 연결 확인을 누릅니다.</li>
+    </ol>
+    <div class="add-row"><input id="bridge-url" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off" aria-label="웹 앱 URL"><button class="btn primary" data-action="bridge-test" ${calBusy ? 'disabled' : ''}>연결 확인</button></div>
+    ${secret ? `<details class="bridge-code" ${ui.bridgeShow ? 'open' : ''}><summary class="small">코드 직접 보기</summary><textarea readonly rows="8" aria-label="Apps Script 코드">${esc(scriptCode(secret))}</textarea></details>` : ''}
+  </div>`;
+}
+
 function calendarCard() {
   const head = s => `<div class="card-head"><h2>구글 캘린더</h2><span class="muted small">${s}</span></div>`;
-  if (!gcal.available) return `<article class="card">${head('설정 전')}<p class="muted small">Google Cloud에서 OAuth 클라이언트를 만들어 config.js에 넣으면 켤 수 있습니다(README의 '구글 캘린더 연결' 참고).</p></article>`;
-  const m = calMeta();
+  const m = calMeta(), b = bridge(), n = calPending();
+  const last = m.syncedAt ? ` 마지막 반영: ${fmtMD(ymd(new Date(m.syncedAt)))} ${hmOf(m.syncedAt)}` : '';
+  if (b) {
+    const status = calBusy ? '반영 중…' : calError ? '반영 실패' : n ? `반영 대기 ${n}건` : '최신 상태';
+    return `<article class="card">${head(status)}
+      <p class="muted small">상시 연결됨(Apps Script). 알림이 필요한 일정을 '${esc(BASE_TITLE)}' 캘린더에 로그인 없이 자동으로 반영합니다.${last}</p>
+      ${calError ? `<p class="warn-line small">${esc(calError)}</p>` : ''}
+      <div class="btn-row wrap"><button class="btn" data-action="cal-sync" ${calBusy ? 'disabled' : ''}>지금 반영</button><button class="btn" data-action="bridge-copy">코드 다시 복사</button><button class="btn danger" data-action="bridge-off">상시 연결 끊기</button></div>
+      ${ui.bridgeShow && m.bridgeSecret ? `<details class="bridge-code" open><summary class="small">코드 직접 보기</summary><textarea readonly rows="8" aria-label="Apps Script 코드">${esc(scriptCode(m.bridgeSecret))}</textarea></details>` : ''}
+    </article>`;
+  }
+  if (!gcal.available) return `<article class="card">${head('연결 안 됨')}${bridgeSetup()}</article>`;
   if (!m.calendarId) {
     return `<article class="card">${head('연결 안 됨')}
-      <p class="muted small">연결하면 구글 캘린더에 '학업 플래너' 캘린더를 만들고, 알림이 필요한 일정을 자동으로 넣습니다. 플래너가 만든 캘린더만 다루고, 원래 쓰던 일정에는 손대지 않습니다. 연결은 크롬북에서 하는 것을 권합니다.</p>
-      <div class="btn-row"><button class="btn primary" data-action="cal-sync">구글 캘린더 연결</button></div></article>`;
+      <p class="muted small">연결하면 구글 캘린더에 '${esc(BASE_TITLE)}' 캘린더를 만들고, 알림이 필요한 일정을 자동으로 넣습니다. 플래너가 만든 캘린더만 다루고, 원래 쓰던 일정에는 손대지 않습니다.</p>
+      ${bridgeSetup()}
+      <p class="muted small">상시 연결 없이 지금 기기에서만 잠깐 연결하려면: <button class="link-btn" data-action="cal-sync">구글 로그인으로 연결</button></p></article>`;
   }
-  const n = calPending();
   const status = calBusy ? '반영 중…' : n ? `반영 대기 ${n}건` : '최신 상태';
   return `<article class="card">${head(status)}
-    <p class="muted small">'학업 플래너' 캘린더에 알림 일정을 넣고 있습니다.${m.syncedAt ? ` 마지막 반영: ${fmtMD(ymd(new Date(m.syncedAt)))} ${hmOf(m.syncedAt)}` : ''}</p>
-    <p class="muted small">구글 연결 권한은 1시간 정도면 만료됩니다. 만료된 뒤 바뀐 내용이 있으면 상단에 📅 표시가 뜨고, 누르면 반영됩니다.${gcal.hasScope(CAL_SCOPE) ? ' 지금은 연결이 살아 있어 바뀐 내용이 자동으로 반영됩니다.' : ''}</p>
+    <p class="muted small">'${esc(BASE_TITLE)}' 캘린더에 알림 일정을 넣고 있습니다.${last}</p>
+    <p class="muted small">지금은 구글 로그인 권한으로 연결돼 있어 1시간 정도면 만료됩니다. 만료된 뒤 바뀐 내용이 있으면 상단에 📅 표시가 뜨고, 누르면 반영됩니다.${gcal.hasScope(CAL_SCOPE) ? ' 지금은 연결이 살아 있어 자동으로 반영됩니다.' : ''}</p>
     <div class="btn-row wrap"><button class="btn" data-action="cal-sync" ${calBusy ? 'disabled' : ''}>지금 반영</button><button class="btn danger" data-action="cal-disconnect">연결 해제</button></div>
+    ${bridgeSetup()}
   </article>`;
 }
 
@@ -2531,6 +2606,45 @@ const actions = {
   },
   'cl-del'(el) { const C = checklistSet(); saveChecklist({ ...C, items: C.items.filter((_, i) => i !== Number(el.dataset.i)) }); },
   'cal-sync'() { calSync({ interactive: true }); },
+  async 'bridge-copy'() {
+    let secret = calMeta().bridgeSecret;
+    if (!secret) { secret = makeSecret(); store.set('meta', 'calendar', { bridgeSecret: secret }); }
+    try {
+      await navigator.clipboard.writeText(scriptCode(secret));
+      toast('코드를 복사했습니다. script.google.com의 새 프로젝트에 붙여 넣어 주세요.');
+    } catch {
+      ui.bridgeShow = true;
+      render();
+      toast("복사가 막혀 있어 '코드 직접 보기'를 펼쳤습니다. 칸 안을 전부 선택해 복사해 주세요.");
+    }
+  },
+  async 'bridge-test'() {
+    const url = document.getElementById('bridge-url')?.value.trim() || '';
+    const secret = calMeta().bridgeSecret;
+    if (!secret) { toast("먼저 '코드 복사'를 눌러 Apps Script에 붙여 넣어 주세요."); return; }
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) { toast('웹 앱 URL은 https://script.google.com/macros/s/…/exec 형태입니다.'); return; }
+    if (!navigator.onLine) { toast('오프라인이라 확인할 수 없습니다.'); return; }
+    calBusy = true; render();
+    try {
+      const r = await bridgeCall(url, secret, 'ping', { calendarId: calMeta().calendarId || null, name: BASE_TITLE, timeZone: TZ });
+      store.set('meta', 'calendar', { bridgeUrl: url, calendarId: r.calendarId });
+      calError = '';
+      toast('상시 연결됐습니다. 이제 로그인 없이 자동으로 반영됩니다.');
+      calBusy = false;
+      calSync();
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      calBusy = false;
+      render();
+    }
+  },
+  'bridge-off'() {
+    if (!confirm('상시 연결을 끊을까요? Apps Script와 캘린더는 그대로 남습니다. 다시 연결할 때는 같은 웹 앱 URL을 넣으면 됩니다.')) return;
+    store.set('meta', 'calendar', { bridgeUrl: null });
+    calError = '';
+    toast('상시 연결을 끊었습니다.');
+  },
   'cal-disconnect'() {
     if (!confirm("캘린더 연결을 해제할까요? 구글 캘린더의 '학업 플래너' 캘린더는 그대로 남으니, 필요 없으면 구글 캘린더에서 직접 지워 주세요.")) return;
     gcal.revoke();
