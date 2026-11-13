@@ -1,7 +1,8 @@
-// 학업 플래너 — 화면과 동작
+// Planerr — 화면과 동작
 import { Store } from './store.js';
 import { tasksOf, taskPatch, isTask, listOfMap, mapPatch } from './tasks.js';
 import { bridgeCall, scriptCode, makeSecret } from './bridge.js';
+import { areaList, areaInfo as areaInfoOf, topAreas, subAreas, DEFAULT_AREA } from './areas.js';
 import { applyTheme, cachedTheme, cacheTheme, fillTheme, PRESETS, COLOR_DEFS, COLOR_KEYS, rgb } from './theme.js';
 import { Player, cacheGet, cachePut, cacheDelete, cacheIds, legacyTracks, legacyClear } from './music.js';
 import { ensureFolder, uploadFile, downloadFile, deleteFile } from './drive.js';
@@ -11,8 +12,8 @@ import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timeta
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.13.1';
-const BASE_TITLE = '학업 플래너';
+const APP_VERSION = '1.14.0';
+const BASE_TITLE = 'Planerr';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
 
@@ -43,6 +44,7 @@ const mmss = (ms, ceil = false) => {
 
 /* ───────── 화면 상태 ───────── */
 const ui = {
+  areaFilter: (() => { try { return localStorage.getItem('planner.areaFilter.v1') || ''; } catch { return ''; } })(), // 걸러 볼 영역(''면 전체)
   view: 'day',
   day: todayStr(),
   week: weekStart(todayStr()),
@@ -77,19 +79,85 @@ const projectList = () => Object.entries(store.data.projects)
   .map(([id, p]) => ({ ...p, id }))
   .sort((a, b) => (a.deadline || '9999').localeCompare(b.deadline || '9999'));
 const activeProjects = () => projectList().filter(p => !p.archived);
-const sortedMs = p => [...(p.milestones || [])].sort((a, b) => (a.due || '').localeCompare(b.due || ''));
+// 날짜 있는 단계는 날짜순, 날짜 없는 단계(마감 없는 프로젝트)는 넣은 순서대로 그 뒤에
+const sortedMs = p => [...(p.milestones || [])].sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999'));
+
+/* ───────── 영역(학업·자기개발·여가와 세부 영역) — 데이터 규칙은 areas.js ───────── */
+const areas = () => areaList(store.data.meta.areas);
+const areaInfo = id => areaInfoOf(areas(), id);
+const itemArea = x => (x && x.area) || DEFAULT_AREA; // 영역이 없던 예전 과제·프로젝트는 학업
+const LA_KEY = 'planner.lastArea.v1';
+const lsGet = k => { try { return localStorage.getItem(k) || ''; } catch { return ''; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* 무시 */ } };
+const areaFilter = () => { const f = ui.areaFilter; return f && topAreas(areas()).some(a => a.id === f) ? f : ''; };
+const inFilter = x => { const f = areaFilter(); return !f || areaInfo(itemArea(x)).top.id === f; };
+const focusOk = t => !areaInfo(itemArea(t)).top.quiet; // '지금 할 과제'로 올라올 수 있는 영역인지(quiet면 아님)
+function setAreas(list) {
+  const tm = mapPatch(store.data.meta.areas?.items, list);
+  if (tm) store.patch('meta', 'areas', { items: tm });
+}
+// 새 과제·프로젝트의 영역: 걸러 보는 중이면 그 영역, 아니면 이 기기에서 마지막으로 고른 영역
+function defaultArea() {
+  const f = areaFilter(), last = lsGet(LA_KEY), ok = last && areas().some(a => a.id === last && !a.archived);
+  if (f) return ok && areaInfo(last).top.id === f ? last : f;
+  if (ok) return last;
+  const tops = topAreas(areas());
+  return tops.some(a => a.id === DEFAULT_AREA) ? DEFAULT_AREA : tops[0]?.id || DEFAULT_AREA;
+}
+const AREA_COLORS = ['#4a7fd4', '#2f9e6e', '#c2569f', '#d08a2e', '#7a63c9', '#2aa1b3', '#c4513d', '#6b8e23'];
+
+function areasCard() {
+  const list = areas(), tops = topAreas(list);
+  const ex = { study: '수학', growth: '작곡', leisure: '리듬게임' };
+  const subChip = a => `<span class="sub-chip"><input class="sub-in" data-change="area-field" data-f="text" data-id="${a.id}" data-key="af|${a.id}|text" value="${esc(a.text)}" maxlength="20" aria-label="세부 영역 이름"><button class="icon-btn sm" data-action="area-del" data-id="${a.id}" aria-label="${esc(a.text)} 지우기">×</button></span>`;
+  return `<article class="card">
+    <div class="card-head"><h2>영역</h2></div>
+    <p class="muted small">과제와 프로젝트를 영역으로 나눕니다. 영역 안에는 과목·활동 같은 세부 영역을 한 단계까지 만들 수 있고, 오늘·주·프로젝트 화면 위쪽에서 영역별로 걸러 볼 수 있습니다.</p>
+    ${tops.map(a => `<div class="area-ed" style="--ac:${a.color || '#888888'}">
+      <div class="area-row">
+        <input class="area-emoji" data-change="area-field" data-f="emoji" data-id="${a.id}" data-key="af|${a.id}|emoji" value="${esc(a.emoji || '')}" maxlength="4" aria-label="${esc(a.text)} 이모지">
+        <input class="area-name" data-change="area-field" data-f="text" data-id="${a.id}" data-key="af|${a.id}|text" value="${esc(a.text)}" maxlength="20" aria-label="영역 이름">
+        <input type="color" data-change="area-field" data-f="color" data-id="${a.id}" value="${esc(a.color || '#888888')}" aria-label="${esc(a.text)} 색">
+        ${tops.length > 1 ? `<button class="icon-btn sm" data-action="area-del" data-id="${a.id}" aria-label="${esc(a.text)} 영역 지우기">×</button>` : ''}
+      </div>
+      <label class="check small"><input type="checkbox" data-change="area-field" data-f="quiet" data-id="${a.id}" ${a.quiet ? '' : 'checked'}><span>이 영역 과제를 '지금 할 과제'로 올리기</span></label>
+      ${subAreas(list, a.id).length ? `<div class="sub-chips">${subAreas(list, a.id).map(subChip).join('')}</div>` : ''}
+      <div class="add-row sm"><input id="sub-new-${a.id}" data-enter="sub-add" data-id="${a.id}" placeholder="세부 영역 추가 (예: ${ex[a.id] || '세부 영역'})" maxlength="20" autocomplete="off"><button class="btn sm" data-action="sub-add" data-id="${a.id}">추가</button></div>
+    </div>`).join('')}
+    <div class="add-row"><input id="area-new" data-enter="area-add" placeholder="영역 추가 (예: 운동)" maxlength="20" autocomplete="off"><button class="btn" data-action="area-add">영역 추가</button></div>
+  </article>`;
+}
+function areaOptions(sel) {
+  const list = areas();
+  const opt = (a, label) => `<option value="${a.id}" ${sel === a.id ? 'selected' : ''}>${label}</option>`;
+  let html = topAreas(list).map(t => {
+    const subs = subAreas(list, t.id), head = `${esc(t.emoji || '')} ${esc(t.text)}`;
+    return subs.length ? `<optgroup label="${head}">${opt(t, `${head} (전체)`)}${subs.map(x => opt(x, esc(x.text))).join('')}</optgroup>` : opt(t, head);
+  }).join('');
+  const gone = list.find(a => a.id === sel && a.archived);
+  if (gone) html += `<option value="${gone.id}" selected>${esc(areaInfo(gone.id).full)} (지운 영역)</option>`;
+  return html;
+}
+const areaTag = x => { const i = areaInfo(itemArea(x)); return `<small class="area-tag" style="--ac:${i.color}" title="${esc(i.full)}">${esc(i.label)}</small>`; };
+function areaFilterBar() {
+  const f = areaFilter(), tops = topAreas(areas());
+  return `<div class="area-bar" role="toolbar" aria-label="영역으로 걸러 보기">
+    <button class="area-f ${!f ? 'on' : ''}" data-action="area-filter" data-id="" aria-pressed="${!f}">전체</button>
+    ${tops.map(a => `<button class="area-f ${f === a.id ? 'on' : ''}" data-action="area-filter" data-id="${a.id}" style="--ac:${a.color || '#888888'}" aria-pressed="${f === a.id}"><i></i>${esc(a.emoji || '')} ${esc(a.text)}</button>`).join('')}
+  </div>`;
+}
 
 function eventsBetween(a, b) {
   const out = [];
   for (const p of activeProjects()) {
     for (const m of p.milestones || []) {
-      if (m.due && m.due >= a && m.due <= b) out.push({ kind: 'ms', date: m.due, title: m.title, project: p.name, pid: p.id, mid: m.id, done: !!m.done });
+      if (m.due && m.due >= a && m.due <= b) out.push({ kind: 'ms', date: m.due, title: m.title, project: p.name, pid: p.id, mid: m.id, done: !!m.done, area: p.area });
     }
-    if (p.deadline && p.deadline >= a && p.deadline <= b) out.push({ kind: 'deadline', date: p.deadline, project: p.name, pid: p.id });
+    if (p.deadline && p.deadline >= a && p.deadline <= b) out.push({ kind: 'deadline', date: p.deadline, project: p.name, pid: p.id, area: p.area });
   }
   for (const d of Object.keys(store.data.days)) {
     for (const t of getTasks(d)) {
-      if (t.due && t.due >= a && t.due <= b) out.push({ kind: 'tdue', date: t.due, title: t.text, tdate: d, tid: t.id, done: !!t.done });
+      if (t.due && t.due >= a && t.due <= b) out.push({ kind: 'tdue', date: t.due, title: t.text, tdate: d, tid: t.id, done: !!t.done, area: t.area });
     }
   }
   return out.sort((x, y) => x.date.localeCompare(y.date) || (x.kind === 'deadline') - (y.kind === 'deadline'));
@@ -558,7 +626,7 @@ const deviceId = (() => {
   } catch { return 'dev'; }
 })();
 
-// 알림이 필요한 일정 전체: 과제 알림 시각, 과제 마감일, 장기 과제 중간 지점·공식 마감(어제부터)
+// 알림이 필요한 일정 전체: 과제 알림 시각, 과제 마감일, 프로젝트 중간 지점·공식 마감(어제부터)
 function alarmSchedule() {
   const A = alarmSet(), from = addDays(todayStr(), -1), out = [];
   for (const date of Object.keys(store.data.days)) {
@@ -567,7 +635,7 @@ function alarmSchedule() {
       const when = task.alarm || task.start;
       if (task.done || !when) continue;
       const slot = toMin(task.start) != null ? [atTime(date, task.start), atTime(date, toHM(Math.min(taskEnd(task), 1439)))] : null;
-      out.push({ kind: 'task', key: `t|${date}|${task.id}`, at: atTime(date, when), slot, title: task.text, body: task.memo || '' });
+      out.push({ kind: 'task', key: `t|${date}|${task.id}`, at: atTime(date, when), slot, title: task.text, body: task.memo || '', area: itemArea(task) });
     }
   }
   const marks = [];
@@ -650,8 +718,8 @@ function calDesired() {
     const minutes = task ? [Math.max(0, Math.round((start - it.at) / 60000))] : [...new Set(it.reminders.map(r => Math.max(0, Math.round((start - r) / 60000))))].slice(0, 5);
     return {
       id: hexId(`pl|${it.key}`),
-      summary: task ? `📚 ${it.title}` : it.what === '공식 마감' ? `⚑ ${it.title} 공식 마감` : it.what === '과제 마감' ? `⚑ ${it.title} 마감` : `◆ ${it.title} (중간 지점)`,
-      description: [task ? it.body : '', `학업 플래너: ${PLANNER_URL}`].filter(Boolean).join('\n\n'),
+      summary: task ? `${areaInfo(it.area).emoji} ${it.title}` : it.what === '공식 마감' ? `⚑ ${it.title} 공식 마감` : it.what === '과제 마감' ? `⚑ ${it.title} 마감` : `◆ ${it.title} (중간 지점)`,
+      description: [task ? it.body : '', `Planerr: ${PLANNER_URL}`].filter(Boolean).join('\n\n'),
       start: { dateTime: isoLocal(start), timeZone: TZ },
       end: { dateTime: isoLocal(end), timeZone: TZ },
       reminders: { useDefault: false, overrides: minutes.map(m => ({ method: 'popup', minutes: m })) },
@@ -723,7 +791,7 @@ async function calSync({ interactive = false } = {}) {
     try { ops = await syncCalendar(gcal, calId, desired, opts); }
     catch (e) {
       if (e.status !== 404) throw e;
-      await newCal(); // 구글 캘린더에서 '학업 플래너' 캘린더를 지운 경우 새로 만듦
+      await newCal(); // 구글 캘린더에서 플래너 캘린더를 지운 경우 새로 만듦
       ops = await syncCalendar(gcal, calId, desired, opts);
     }
     store.set('meta', 'calendar', { calendarId: calId, synced: calSyncedList(desired), syncedAt: Date.now() });
@@ -758,7 +826,7 @@ function calTimerUpsert(S = mt) {
   if (fresh) { S.calEventId = hexId(`${A ? 'ta' : 'tm'}|${deviceId}|${Date.now()}`); (A ? atSave : mtSave)(); }
   const base = eventsPath(calMeta().calendarId), st = S.endTime;
   const ev = {
-    id: S.calEventId, summary: A ? '⏰ 알람 타이머 종료' : '⏰ 공부 타이머 종료', description: `학업 플래너: ${PLANNER_URL}`,
+    id: S.calEventId, summary: A ? '⏰ 알람 타이머 종료' : '⏰ 공부 타이머 종료', description: `Planerr: ${PLANNER_URL}`,
     start: { dateTime: isoLocal(st), timeZone: TZ }, end: { dateTime: isoLocal(st + 5 * 60000), timeZone: TZ },
     reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 0 }] },
     extendedProperties: { private: { planner: '1', kind: 'timer', device: deviceId } },
@@ -939,7 +1007,7 @@ async function driveSync({ interactive = false } = {}) {
     }
     let n = 0;
     if (w.up.length) {
-      const folderId = await ensureFolder(gcal, musicMeta().folderId, '학업 플래너 음악');
+      const folderId = await ensureFolder(gcal, musicMeta().folderId, 'Planerr 음악');
       if (folderId !== musicMeta().folderId) saveMusic({ folderId });
       for (const t of w.up) {
         const blob = await cacheGet(t.id);
@@ -1258,7 +1326,7 @@ function linkOptions(r, projects) {
   for (const p of projects) {
     html += `<optgroup label="${esc(p.name)}"><option value="${p.id}::" ${r.projectId === p.id && !r.milestoneId ? 'selected' : ''}>${esc(p.name)} (전체)</option>`;
     for (const m of sortedMs(p).filter(m => !m.done || m.id === r.milestoneId)) {
-      html += `<option value="${p.id}::${m.id}" ${r.milestoneId === m.id ? 'selected' : ''}>${esc(m.title)} · ${fmtMD(m.due)}</option>`;
+      html += `<option value="${p.id}::${m.id}" ${r.milestoneId === m.id ? 'selected' : ''}>${esc(m.title)}${m.due ? ` · ${fmtMD(m.due)}` : ''}</option>`;
     }
     html += `</optgroup>`;
   }
@@ -1267,7 +1335,7 @@ function linkOptions(r, projects) {
 
 /* ───────── 하루 과제 목록 (목록 순서 = 우선순위, 저장 형식은 tasks.js) ───────── */
 const getTasks = s => tasksOf(dayRec(s));
-const topTask = s => getTasks(s).find(t => !t.done) || null;
+const topTask = s => getTasks(s).find(t => !t.done && focusOk(t)) || null;
 function setTasks(s, list) {
   const p = taskPatch(dayRec(s), list);
   if (p) store.patch('days', s, p);
@@ -1325,13 +1393,13 @@ const dueTag = t => (t.due ? `<small class="due-tag ${dueCls(t)}">${dueText(t)}<
 
 // 그날 과제 전체를 우선순위 순서대로(완료한 과제는 줄 그어서)
 function miniTasks(d) {
-  const list = getTasks(d);
+  const all = getTasks(d), list = all.filter(inFilter);
   if (!list.length) return '<span class="muted">—</span>';
-  return `<span class="mini-tasks">${list.map((t, i) => `<span class="mini-item ${t.done ? 'done' : ''}"><span class="rk">${i + 1}</span><span class="mini-text">${esc(t.text)}${t.due && !t.done ? ` <small class="due-tag ${dueCls(t)}">~${fmtMD(t.due)}</small>` : ''}</span></span>`).join('')}</span>`;
+  return `<span class="mini-tasks">${list.map(t => `<span class="mini-item ${t.done ? 'done' : ''}"><span class="rk">${all.indexOf(t) + 1}</span><i class="adot" style="--ac:${areaInfo(itemArea(t)).color}" title="${esc(areaInfo(itemArea(t)).full)}"></i><span class="mini-text">${esc(t.text)}${t.due && !t.done ? ` <small class="due-tag ${dueCls(t)}">~${fmtMD(t.due)}</small>` : ''}</span></span>`).join('')}</span>`;
 }
 
 function monthTaskList(first, last) {
-  const days = Object.keys(store.data.days).filter(k => k >= first && k <= last && getTasks(k).length).sort();
+  const days = Object.keys(store.data.days).filter(k => k >= first && k <= last && getTasks(k).some(inFilter)).sort();
   if (!days.length) return '';
   return `<article class="card month-list">
     <div class="card-head"><h2>이 달의 과제</h2></div>
@@ -1340,40 +1408,44 @@ function monthTaskList(first, last) {
 }
 
 function taskBlock(date) {
-  const tasks = getTasks(date), top = tasks.find(t => !t.done), projects = activeProjects();
-  const undone = tasks.filter(t => !t.done).length;
+  // 영역으로 걸러 보는 중이면 그 영역 과제만 보이고, 순위 번호는 전체 목록 기준. 순서 바꾸기는 '전체'에서만
+  const all = getTasks(date), f = areaFilter(), tasks = f ? all.filter(inFilter) : all, projects = activeProjects();
+  const top = f ? tasks.find(t => !t.done) : tasks.find(t => !t.done && focusOk(t));
+  const undone = all.filter(t => !t.done).length, hidden = all.length - tasks.length;
   const field = (t, f, label, ph) => `<label class="field"><span>${label}</span><input data-tfield="${f}" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|${f}" value="${esc(t[f] || '')}" placeholder="${ph}" maxlength="120" autocomplete="off"></label>`;
   // 메모는 모든 과제에, 시작 시점은 맨 위 과제(지금 할 과제)에만
   const details = (t, isTop) => `<div class="fields">
       ${field(t, 'text', '과제', '과제 이름')}
+      <label class="field"><span>영역</span><select data-change="tarea" data-date="${date}" data-id="${t.id}" data-key="ta|${date}|${t.id}">${areaOptions(itemArea(t))}</select></label>
       <label class="field"><span>뭘 할지</span><textarea rows="2" data-tfield="memo" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|memo" maxlength="500" placeholder="예: 문제집 42쪽부터 3문제 풀기">${esc(t.memo || '')}</textarea></label>
       ${stepsField(date, t)}
       ${isTop ? field(t, 'cue', '시작 시점 (선택)', '예: 점심 먹고 책상에 앉으면') : ''}
       ${slotField(date, t)}
       <label class="field"><span>마감일 (선택)</span><span class="time-row"><input type="date" data-tfield="due" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|due" value="${esc(t.due || '')}">${t.due ? `<button type="button" class="link-btn" data-action="t-due-clear" data-date="${date}" data-id="${t.id}">지우기</button>` : ''}</span></label>
       <label class="field"><span>알림 시각 (선택)</span><span class="time-row"><input type="time" data-tfield="alarm" data-date="${date}" data-id="${t.id}" data-key="t|${date}|${t.id}|alarm" value="${esc(t.alarm || '')}">${t.alarm ? `<button type="button" class="link-btn" data-action="t-alarm-clear" data-date="${date}" data-id="${t.id}">지우기</button>` : ''}</span></label>
-      ${projects.length ? `<label class="field"><span>장기 과제</span><select data-change="tlink" data-date="${date}" data-id="${t.id}" data-key="tl|${date}|${t.id}">${linkOptions(t, projects)}</select></label>` : ''}
+      ${projects.length ? `<label class="field"><span>프로젝트</span><select data-change="tlink" data-date="${date}" data-id="${t.id}" data-key="tl|${date}|${t.id}">${linkOptions(t, projects)}</select></label>` : ''}
     </div>
     ${isTop && t.cue ? `<p class="plan-line"><span>${esc(t.cue)}</span><i>→</i><span>${esc(t.text)}</span></p>` : ''}`;
   const focus = top
     ? `<div class="now-task">
-        <div class="now-head"><span class="now-label">${date === todayStr() ? '지금 할 과제' : '먼저 할 과제'} · ${tasks.indexOf(top) + 1}순위</span><label class="check"><input type="checkbox" data-change="tdone" data-date="${date}" data-id="${top.id}" aria-label="지금 할 과제 완료"><span>완료</span></label></div>
+        <div class="now-head"><span class="now-label">${date === todayStr() ? '지금 할 과제' : '먼저 할 과제'} · ${all.indexOf(top) + 1}순위</span><label class="check"><input type="checkbox" data-change="tdone" data-date="${date}" data-id="${top.id}" aria-label="지금 할 과제 완료"><span>완료</span></label></div>
         ${stuckBox(date, top)}
         ${stepsOf(top).length && stepsOf(top).every(x => x.done) ? `<div class="steps-done"><span>모든 단계를 끝냈습니다.</span><button type="button" class="btn sm primary" data-action="step-done-task" data-date="${date}" data-id="${top.id}">과제 완료</button></div>` : ''}
         ${details(top, true)}
       </div>`
-    : tasks.length ? `<p class="all-done">✓ 모든 과제를 끝냈습니다</p>` : '';
-  const rows = tasks.map((t, i) => {
-    const editing = ui.editTask === `${date}|${t.id}`, isTop = t === top;
+    : tasks.some(t => !t.done) ? `<p class="muted small">남은 과제는 '지금 할 과제'로 올리지 않는 영역에 있습니다(설정 → 영역).</p>`
+    : tasks.length ? `<p class="all-done">✓ ${f ? '이 영역의 ' : ''}모든 과제를 끝냈습니다</p>` : '';
+  const rows = tasks.map(t => {
+    const i = all.indexOf(t), editing = ui.editTask === `${date}|${t.id}`, isTop = t === top;
     return `<li class="task-row ${t.done ? 'done' : ''} ${isTop ? 'is-top' : ''}" data-sort-id="${t.id}">
       <div class="tr-main">
-        <button class="drag-handle" type="button" aria-label="끌어서 순서 바꾸기">${GRIP}</button>
+        ${f ? '' : `<button class="drag-handle" type="button" aria-label="끌어서 순서 바꾸기">${GRIP}</button>`}
         <span class="rank">${i + 1}</span>
         <input type="checkbox" data-change="tdone" data-date="${date}" data-id="${t.id}" ${t.done ? 'checked' : ''} aria-label="${esc(t.text)} 완료">
         <span class="tr-text">${esc(t.text)}${rowTags(date, t, isTop, editing)}</span>
         <span class="tr-btns">
-          <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="우선순위 올리기">↑</button>
-          <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="1" ${i === tasks.length - 1 ? 'disabled' : ''} aria-label="우선순위 내리기">↓</button>
+          ${f ? '' : `<button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="우선순위 올리기">↑</button>
+          <button class="icon-btn sm" data-action="t-move" data-date="${date}" data-id="${t.id}" data-dir="1" ${i === all.length - 1 ? 'disabled' : ''} aria-label="우선순위 내리기">↓</button>`}
           <button class="icon-btn sm ${editing ? 'on' : ''}" data-action="t-edit" data-date="${date}" data-id="${t.id}" aria-label="자세히" aria-expanded="${editing}">⋯</button>
         </span>
       </div>
@@ -1388,14 +1460,15 @@ function taskBlock(date) {
     </li>`;
   }).join('');
   return `${focus}
-    ${tasks.length ? `<div class="task-list-head"><span>우선순위</span>${undone ? `<button class="link-btn" data-action="t-carry-all" data-date="${date}">남은 ${undone}개 ${carryLabel(date)}</button>` : ''}</div>
-    <ol class="task-list" data-sortable="tasks" data-date="${date}">${rows}</ol>` : ''}
+    ${tasks.length ? `<div class="task-list-head"><span>우선순위${f && hidden ? ` <small class="muted">· 다른 영역 ${hidden}개 숨김, 순서는 '전체'에서</small>` : ''}</span>${undone ? `<button class="link-btn" data-action="t-carry-all" data-date="${date}">남은 ${undone}개 ${carryLabel(date)}</button>` : ''}</div>
+    <ol class="task-list" ${f ? '' : 'data-sortable="tasks"'} data-date="${date}">${rows}</ol>` : f && hidden ? `<p class="muted small">이 영역 과제가 없습니다. 다른 영역 과제 ${hidden}개는 '전체'에서 보입니다.</p>` : ''}
     <div class="add-row">
-      <input id="t-new-${date}" data-enter="t-add" data-date="${date}" placeholder="${tasks.length ? '과제 추가 (맨 아래 순위로)' : '예: 보고서 서론 쓰기'}" maxlength="120" autocomplete="off" aria-label="과제 추가">
+      <input id="t-new-${date}" data-enter="t-add" data-date="${date}" placeholder="${all.length ? '과제 추가 (맨 아래 순위로)' : '예: 보고서 서론 쓰기'}" maxlength="120" autocomplete="off" aria-label="과제 추가">
+      <select id="t-new-area-${date}" class="area-in" aria-label="영역">${areaOptions(defaultArea())}</select>
       <input type="date" id="t-new-due-${date}" class="due-in" aria-label="마감일 (선택)" title="마감일 (선택)">
       <button class="btn primary" data-action="t-add" data-date="${date}">추가</button>
     </div>
-    ${tasks.length ? '' : `<p class="muted small">우선순위 순서대로 추가하세요. 맨 위의 끝나지 않은 과제가 '지금 할 과제'가 됩니다.</p>`}`;
+    ${all.length ? '' : `<p class="muted small">우선순위 순서대로 추가하세요. 맨 위의 끝나지 않은 과제가 '지금 할 과제'가 됩니다.</p>`}`;
 }
 
 /* ───────── 상시 과제칸 ─────────
@@ -1508,7 +1581,7 @@ function stuckBox(date, t) {
 
 function rowTags(date, t, isTop, editing) {
   const st = stepsOf(t), dn = st.filter(x => x.done).length;
-  return `${dueTag(t)}`
+  return `${areaTag(t)}${dueTag(t)}`
     + `${t.start && !t.done ? `<small class="tr-slot"> 🕒 ${esc(t.start)}${t.end ? `–${esc(t.end)}` : ''}</small>` : ''}`
     + `${t.alarm && !t.done ? `<small class="tr-alarm"> ⏰ ${esc(t.alarm)}</small>` : ''}`
     + `${st.length ? `<small class="muted"> · 단계 ${dn}/${st.length}</small>` : ''}`
@@ -1648,6 +1721,7 @@ function timerCard(r) {
 function upcomingCard(s) {
   const t = todayStr(), until = addDays(s, 14);
   const ev = eventsBetween('0000-00-00', until)
+    .filter(inFilter)
     .filter(e => !(e.kind === 'tdue' && e.done))
     .filter(e => e.date >= s || (s === t && (e.kind === 'ms' || e.kind === 'tdue') && !e.done));
   if (!ev.length) return '';
@@ -1678,6 +1752,7 @@ function viewDay() {
       <div><b>${st.best}</b><span>최장 기록</span></div>
       <div class="${st.todayDone ? 'ok' : ''}"><b>${st.todayDone ? '✓' : '–'}</b><span>오늘 시작</span></div>
     </div>
+    ${areaFilterBar()}
     <article class="card">
       <div class="card-head"><h2>${isToday ? (ui.pinView ? '상시 과제칸' : '오늘의 과제') : '이 날의 과제'}</h2><span class="head-right">${isToday ? pinChip() : ''}${r.focusMin ? `<span class="muted small">집중 ${r.focusMin}분</span>` : ''}${isToday && 'documentPictureInPicture' in window ? `<button class="chip-btn ${pipWin ? 'on' : ''}" data-action="mt-pip">${pipWin ? '미션 창 닫기' : '미션 창'}</button>` : ''}<span class="pill ${r.started ? 'on' : ''}">${r.started ? '시작함' : '시작 전'}</span></span></div>
       ${isToday && ui.pinView ? pinPanel() : taskBlock(s)}
@@ -1700,7 +1775,7 @@ function viewWeek() {
   const ws = ui.week, we = addDays(ws, 6), t = todayStr();
   const curWs = weekStart(t), isCur = ws === curWs;
   const goals = store.data.weeks[ws]?.goals || [];
-  const ev = eventsBetween(ws, we);
+  const ev = eventsBetween(ws, we).filter(inFilter);
   const projects = activeProjects();
   const doneN = goals.filter(g => g.done).length;
   const n = Math.round(diffDays(curWs, ws) / 7);
@@ -1715,17 +1790,18 @@ function viewWeek() {
   }).join('');
   return `<section class="view">
     ${dateHeader(`${fmtMD(ws)} – ${fmtMD(we)}`, isCur ? '이번 주' : `${Math.abs(n)}주 ${n < 0 ? '전' : '후'}`, 'week', !isCur, '이번 주로')}
+    ${areaFilterBar()}
     <article class="card">
       <div class="card-head"><h2>이 주에 끝낼 결과물</h2>${goals.length ? `<span class="muted small">${doneN}/${goals.length}</span>` : ''}</div>
       ${goals.length ? `<ul class="goal-list">${goals.map(g => goalItem(ws, g, true)).join('')}</ul>` : `<p class="muted small">한 주에 한두 개면 충분합니다.</p>`}
       <div class="add-row">
         <input id="goal-new" data-enter="goal-add" placeholder="예: 실험 방법 초안 완성" maxlength="120" autocomplete="off">
-        ${projects.length ? `<select id="goal-proj" aria-label="장기 과제 연결"><option value="">연결 안 함</option>${projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>` : ''}
+        ${projects.length ? `<select id="goal-proj" aria-label="프로젝트 연결"><option value="">연결 안 함</option>${projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>` : ''}
         <button class="btn primary" data-action="goal-add">추가</button>
       </div>
     </article>
     ${ev.length ? `<article class="card">
-      <div class="card-head"><h2>마감 일정</h2><span class="muted small">과제 마감·장기 과제</span></div>
+      <div class="card-head"><h2>마감 일정</h2><span class="muted small">과제 마감·프로젝트</span></div>
       <ul class="ev-list">${ev.map(evItem).join('')}</ul>
     </article>` : ''}
     <article class="card">
@@ -1769,22 +1845,23 @@ function viewMonth() {
   </section>`;
 }
 
-/* ───────── 장기 과제 화면 ───────── */
+/* ───────── 프로젝트 화면 (예전 '장기 과제') ───────── */
 function newProjectForm() {
   const t = todayStr();
   return `<article class="card">
-    <div class="card-head"><h2>새 장기 과제</h2></div>
+    <div class="card-head"><h2>새 프로젝트</h2></div>
     <div class="fields">
-      <label class="field"><span>이름</span><input id="np-name" placeholder="예: 화학 IA" maxlength="80" autocomplete="off"></label>
+      <label class="field"><span>이름</span><input id="np-name" placeholder="예: 화학 IA, 소설 개정, 작곡 공부" maxlength="80" autocomplete="off"></label>
+      <label class="field"><span>영역</span><select id="np-area">${areaOptions(defaultArea())}</select></label>
       <div class="field-row">
         <label class="field"><span>시작일</span><input id="np-start" type="date" value="${t}"></label>
-        <label class="field"><span>공식 마감</span><input id="np-deadline" type="date"></label>
+        <label class="field"><span>공식 마감 (선택)</span><input id="np-deadline" type="date"></label>
       </div>
-      <label class="field"><span>여유 기간 — 마감 며칠 전까지 끝낼지</span><input id="np-buffer" type="number" min="0" max="60" value="3" inputmode="numeric"></label>
-      <label class="field"><span>단계 — 한 줄에 하나씩, 순서대로</span><textarea id="np-steps" rows="5">${DEFAULT_STEPS.join('\n')}</textarea></label>
+      <label class="field"><span>여유 기간 — 마감 며칠 전까지 끝낼지(마감이 있을 때)</span><input id="np-buffer" type="number" min="0" max="60" value="3" inputmode="numeric"></label>
+      <label class="field"><span>단계 — 한 줄에 하나씩, 순서대로</span><textarea id="np-steps" rows="5" placeholder="${esc(DEFAULT_STEPS.join('\n'))}"></textarea></label>
     </div>
-    <p class="muted small">단계는 시작일부터 '공식 마감 − 여유 기간'까지 고르게 나뉘어 배치됩니다. 만든 뒤에 날짜를 직접 고칠 수 있습니다.</p>
-    <div class="btn-row"><button class="btn primary" data-action="proj-create">역산해서 만들기</button><button class="btn" data-action="proj-cancel">취소</button></div>
+    <p class="muted small">마감이 있으면 단계를 시작일부터 '공식 마감 − 여유 기간'까지 고르게 나눠 배치합니다(단계를 비워 두면 기본 단계). 마감이 없으면 단계를 날짜 없이 순서대로 두고, 필요할 때 날짜를 직접 넣을 수 있습니다.</p>
+    <div class="btn-row"><button class="btn primary" data-action="proj-create">만들기</button><button class="btn" data-action="proj-cancel">취소</button></div>
   </article>`;
 }
 
@@ -1793,7 +1870,7 @@ function projectDetail(p, ms) {
   const b = f => `data-bind="projects|${p.id}|${f}" data-key="projects|${p.id}|${f}"`;
   return `<div class="proj-detail">
     <ul class="ms-list">${ms.map(m => `
-      <li class="ms ${m.done ? 'done' : ''} ${!m.done && m.due < t ? 'late' : ''}">
+      <li class="ms ${m.done ? 'done' : ''} ${!m.done && m.due && m.due < t ? 'late' : ''}">
         <input type="checkbox" data-change="ms-toggle" data-p="${p.id}" data-m="${m.id}" ${m.done ? 'checked' : ''} aria-label="${esc(m.title)} 완료">
         <input class="ms-title" data-change="ms-title" data-p="${p.id}" data-m="${m.id}" data-key="mst|${m.id}" value="${esc(m.title)}" maxlength="80" aria-label="단계 이름">
         <input class="ms-due" type="date" data-change="ms-due" data-p="${p.id}" data-m="${m.id}" data-key="msd|${m.id}" value="${m.due || ''}" aria-label="단계 날짜">
@@ -1802,16 +1879,17 @@ function projectDetail(p, ms) {
     </ul>
     <div class="add-row">
       <input id="ms-new-${p.id}" data-enter="ms-add" data-p="${p.id}" placeholder="단계 추가" maxlength="80" autocomplete="off">
-      <input id="ms-new-date-${p.id}" type="date" value="${p.deadline ? addDays(p.deadline, -Number(p.buffer ?? 3)) : t}" aria-label="새 단계 날짜">
+      <input id="ms-new-date-${p.id}" type="date" value="${p.deadline ? addDays(p.deadline, -Number(p.buffer ?? 3)) : ''}" aria-label="새 단계 날짜 (선택)">
       <button class="btn" data-action="ms-add" data-p="${p.id}">추가</button>
     </div>
     <div class="fields two">
       <label class="field"><span>이름</span><input ${b('name')} value="${esc(p.name)}" maxlength="80"></label>
-      <label class="field"><span>공식 마감</span><input type="date" ${b('deadline')} value="${p.deadline || ''}"></label>
+      <label class="field"><span>영역</span><select data-change="parea" data-id="${p.id}" data-key="pa|${p.id}">${areaOptions(itemArea(p))}</select></label>
+      <label class="field"><span>공식 마감 (선택)</span><input type="date" ${b('deadline')} value="${p.deadline || ''}"></label>
       <label class="field"><span>여유 기간(일)</span><input type="number" min="0" max="60" inputmode="numeric" ${b('buffer')} value="${p.buffer ?? 3}"></label>
     </div>
     <div class="btn-row wrap">
-      <button class="btn" data-action="proj-redistribute" data-id="${p.id}">남은 단계 다시 역산</button>
+      ${p.deadline ? `<button class="btn" data-action="proj-redistribute" data-id="${p.id}">남은 단계 다시 역산</button>` : ''}
       <button class="btn" data-action="proj-archive" data-id="${p.id}">보관</button>
       <button class="btn danger" data-action="proj-del" data-id="${p.id}">삭제</button>
     </div>
@@ -1824,28 +1902,29 @@ function projectCard(p) {
   const pct = ms.length ? Math.round((done / ms.length) * 100) : 0;
   return `<article class="card project ${open ? 'open' : ''}">
     <button class="proj-head" data-action="proj-open" data-id="${p.id}" aria-expanded="${open}">
-      <span class="proj-title"><b>${esc(p.name)}</b><small>${p.deadline ? `${fmtMD(p.deadline)} 마감 · ${dday(p.deadline)}` : '마감 미정'}</small></span>
+      <span class="proj-title"><b>${esc(p.name)}</b><small>${areaTag(p)} ${p.deadline ? `${fmtMD(p.deadline)} 마감 · ${dday(p.deadline)}` : '마감 없음'}</small></span>
       <span class="proj-count">${done}/${ms.length}<i class="chev">${open ? '−' : '+'}</i></span>
     </button>
     <div class="bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct}%"></i></div>
     ${next
-      ? `<p class="proj-next ${next.due < t ? 'late' : ''}">다음: ${esc(next.title)} · ${fmtMD(next.due)} (${next.due < t ? '지남' : dday(next.due)})</p>`
+      ? `<p class="proj-next ${next.due && next.due < t ? 'late' : ''}">다음: ${esc(next.title)}${next.due ? ` · ${fmtMD(next.due)} (${next.due < t ? '지남' : dday(next.due)})` : ''}</p>`
       : ms.length ? `<p class="proj-next ok">모든 단계를 끝냈습니다</p>` : '<p class="proj-next">단계가 없습니다</p>'}
     ${open ? projectDetail(p, ms) : ''}
   </article>`;
 }
 
 function viewProjects() {
-  const all = projectList(), active = all.filter(p => !p.archived), archived = all.filter(p => p.archived);
-  const empty = `<article class="card"><p class="muted">아직 장기 과제가 없습니다. IA나 EE처럼 마감이 먼 과제를 등록하면, 마감에서 거꾸로 계산한 중간 지점이 오늘·주·달 화면에 자동으로 표시됩니다.</p></article>`;
+  const all = projectList().filter(inFilter), active = all.filter(p => !p.archived), archived = all.filter(p => p.archived);
+  const empty = `<article class="card"><p class="muted">${areaFilter() ? '이 영역에 프로젝트가 없습니다.' : '아직 프로젝트가 없습니다.'} IA나 EE처럼 마감이 있는 것은 마감에서 거꾸로 중간 지점을 잡아 오늘·주·달 화면에 표시하고, 소설 개정이나 작곡 공부처럼 마감이 없는 것도 단계로 나눠 관리할 수 있습니다.</p></article>`;
   return `<section class="view">
     <header class="vhead plain">
-      <div class="vtitle"><h1>장기 과제</h1><span class="sub">마감에서 거꾸로 중간 지점을 잡습니다</span></div>
-      ${ui.newProject ? '' : `<button class="btn primary" data-action="proj-new">새 장기 과제</button>`}
+      <div class="vtitle"><h1>프로젝트</h1><span class="sub">단계로 나누고, 마감이 있으면 거꾸로 중간 지점을 잡습니다</span></div>
+      ${ui.newProject ? '' : `<button class="btn primary" data-action="proj-new">새 프로젝트</button>`}
     </header>
+    ${areaFilterBar()}
     ${ui.newProject ? newProjectForm() : ''}
     ${active.length ? active.map(projectCard).join('') : ui.newProject ? '' : empty}
-    ${archived.length ? `<button class="link-btn" data-action="toggle-archived">${ui.showArchived ? '보관함 접기' : `보관된 과제 ${archived.length}개 보기`}</button>
+    ${archived.length ? `<button class="link-btn" data-action="toggle-archived">${ui.showArchived ? '보관함 접기' : `보관된 프로젝트 ${archived.length}개 보기`}</button>
       ${ui.showArchived ? archived.map(p => `<article class="card slim archived">
         <span>${esc(p.name)} <small class="muted">${p.deadline ? `${fmtMD(p.deadline)} 마감` : ''}</small></span>
         <span class="btn-row tight"><button class="btn sm" data-action="proj-restore" data-id="${p.id}">복원</button><button class="btn sm danger" data-action="proj-del" data-id="${p.id}">삭제</button></span>
@@ -2038,7 +2117,7 @@ function alarmCard() {
     </div>`;
   return `<article class="card">
     <div class="card-head"><h2>알림</h2></div>
-    <p class="muted small">과제마다 '알림 시각'을 정할 수 있고, 과제 마감일과 장기 과제의 중간 지점·공식 마감은 아래 시각에 알려 줍니다. 앱 안 알람은 앱이 열려 있을 때 울리고, 구글 캘린더를 연결하면 앱이 꺼져 있거나 오프라인이어도 캘린더 앱이 알려 줍니다.</p>
+    <p class="muted small">과제마다 '알림 시각'을 정할 수 있고, 과제 마감일과 프로젝트의 중간 지점·공식 마감은 아래 시각에 알려 줍니다. 앱 안 알람은 앱이 열려 있을 때 울리고, 구글 캘린더를 연결하면 앱이 꺼져 있거나 오프라인이어도 캘린더 앱이 알려 줍니다.</p>
     <div class="alarm-rows">${row('dayBefore', '마감·중간 지점 전날')}${row('sameDay', '마감·중간 지점 당일')}</div>
     <div class="fields">
       <label class="check"><input type="checkbox" data-alarm="appSound" ${A.appSound ? 'checked' : ''}><span>앱 안 알람 소리</span></label>
@@ -2139,6 +2218,7 @@ function viewSettings() {
       <div class="card-head"><h2>과제</h2></div>
       <label class="check"><input type="checkbox" data-bind="meta|settings|autoCarry" data-key="meta|settings|autoCarry" ${settings().autoCarry === false ? '' : 'checked'}><span>못 끝낸 과제를 다음 날로 자동으로 넘기기 <small class="muted">(앱을 열 때 지난날 남은 과제를 오늘 목록 맨 아래로 옮김)</small></span></label>
     </article>
+    ${areasCard()}
     ${routineCard()}
     ${checklistCard()}
     <article class="card">
@@ -2157,7 +2237,7 @@ function viewSettings() {
       </div>
       ${restoreBox()}
     </article>
-    <p class="muted small center">학업 플래너 v${APP_VERSION}</p>
+    <p class="muted small center">Planerr v${APP_VERSION}</p>
   </section>`;
 }
 
@@ -2179,7 +2259,7 @@ const AUTH_ERR = {
 function viewAuth() {
   const off = !store.status.online;
   return center(`<section class="auth card">
-    <h1>학업 플래너</h1>
+    <h1>Planerr</h1>
     <p class="muted small">모든 기기에서 같은 계정으로 로그인하면 기록이 이어집니다. 한 번 로그인한 기기는 오프라인에서도 열립니다.</p>
     ${off ? `<p class="notice">지금은 오프라인입니다. 처음 로그인할 때는 인터넷 연결이 필요합니다.</p>` : ''}
     <form id="auth-form" class="fields" novalidate>
@@ -2221,11 +2301,11 @@ function shell() {
   if (s.phase === 'error') return center(`<h1>열 수 없습니다</h1><p class="muted">${esc(s.error)}</p>`);
   if (s.phase === 'loading' || s.phase === 'syncing') return center(`<p class="muted">불러오는 중…</p>`);
   if (s.phase === 'login') return viewAuth();
-  const tabs = [['day', '오늘'], ['week', '주'], ['month', '달'], ['projects', '장기 과제'], ['timer', '타이머']];
+  const tabs = [['day', '오늘'], ['week', '주'], ['month', '달'], ['projects', '프로젝트'], ['timer', '타이머']];
   const views = { day: viewDay, week: viewWeek, month: viewMonth, projects: viewProjects, timer: viewTimer, settings: viewSettings };
   return `<div class="layout">
     <header class="topbar">
-      <span class="brand">학업 플래너</span>
+      <span class="brand">Planerr</span>
       <span class="top-right">${timerMini()}${calChip()}${syncBadge()}<button class="icon-btn gear ${ui.view === 'settings' ? 'active' : ''}" data-action="nav" data-view="settings" aria-label="설정">${ICON.settings}</button></span>
     </header>
     <nav class="tabs" aria-label="화면 전환">
@@ -2281,7 +2361,7 @@ let toastTimer = 0;
    지금 어디에도 없는 과제는 백업의 날짜에 다시 넣음. 지금 있는 내용은 지우거나 바꾸지 않음 */
 const RESTORE_FIELDS = [
   ['memo', '뭘 할지'], ['cue', '시작 시점'], ['steps', '단계'], ['due', '마감일'], ['alarm', '알림 시각'],
-  ['start', '할 시간'], ['end', '할 시간'], ['projectId', '장기 과제 연결'], ['milestoneId', '장기 과제 단계'], ['from', '넘어온 날짜'], ['done', '완료 표시'],
+  ['start', '할 시간'], ['end', '할 시간'], ['area', '영역'], ['projectId', '프로젝트 연결'], ['milestoneId', '프로젝트 단계'], ['from', '넘어온 날짜'], ['done', '완료 표시'],
 ];
 const DATE_FIELDS = new Set(['alarm', 'start', 'end']); // 그날에만 의미 있는 항목: 과제가 다른 날로 옮겨졌으면 채우지 않음
 const blank = v => v === undefined || v === null || v === '' || v === false || (Array.isArray(v) && !v.length);
@@ -2321,7 +2401,7 @@ function restoreLoad(file) {
     let j = null;
     try { j = JSON.parse(rd.result); } catch { /* 아래에서 안내 */ }
     const data = j && j.app === 'study-planner' ? j.data : null;
-    if (!data || typeof data.days !== 'object') { toast('학업 플래너 백업 파일이 아닙니다.'); return; }
+    if (!data || typeof data.days !== 'object') { toast('Planerr 백업 파일이 아닙니다.'); return; }
     ui.restore = { name: file.name, at: j.exportedAt || '', version: j.version || '', items: restorePlan(data.days) };
     render();
   };
@@ -2454,7 +2534,7 @@ const actions = {
     const inp = document.getElementById(`ms-new-${pid}`), dateInp = document.getElementById(`ms-new-date-${pid}`);
     const title = inp?.value.trim();
     if (!p || !title) { inp?.focus(); return; }
-    const due = dateInp?.value || todayStr();
+    const due = dateInp?.value || (p.deadline ? todayStr() : ''); // 마감 없는 프로젝트는 날짜 없이도 단계 추가
     inp.value = '';
     store.set('projects', pid, { milestones: [...(p.milestones || []), { id: uid(), title, due, done: false }] });
   },
@@ -2468,19 +2548,21 @@ const actions = {
   'proj-cancel'() { ui.newProject = false; render(); },
   'proj-create'() {
     const v = id => document.getElementById(id)?.value.trim() || '';
-    const name = v('np-name'), start = v('np-start') || todayStr(), deadline = v('np-deadline');
+    const name = v('np-name'), start = v('np-start') || todayStr(), deadline = v('np-deadline'), area = v('np-area') || defaultArea();
     const buffer = Math.max(0, Math.min(60, Number(v('np-buffer')) || 0));
     const steps = v('np-steps').split('\n').map(s => s.trim()).filter(Boolean);
-    if (!name) return toast('과제 이름을 입력해 주세요.');
-    if (!deadline) return toast('공식 마감일을 입력해 주세요.');
-    if (deadline < start) return toast('마감일이 시작일보다 앞설 수 없습니다.');
+    if (!name) return toast('프로젝트 이름을 입력해 주세요.');
+    if (deadline && deadline < start) return toast('마감일이 시작일보다 앞설 수 없습니다.');
     const id = uid();
+    lsSet(LA_KEY, area);
     store.set('projects', id, {
-      name, start, deadline, buffer, archived: false, createdAt: Date.now(),
-      milestones: distribute(start, deadline, buffer, steps.length ? steps : DEFAULT_STEPS),
+      name, area, start, deadline: deadline || '', buffer, archived: false, createdAt: Date.now(),
+      milestones: deadline
+        ? distribute(start, deadline, buffer, steps.length ? steps : DEFAULT_STEPS)
+        : steps.map(title => ({ id: uid(), title, due: '', done: false })),
     });
     ui.newProject = false; ui.openProject = id; render();
-    toast('마감에서 거꾸로 단계를 배치했습니다.');
+    toast(deadline ? '마감에서 거꾸로 단계를 배치했습니다.' : '프로젝트를 만들었습니다.');
   },
   'proj-open'(el) { ui.openProject = ui.openProject === el.dataset.id ? null : el.dataset.id; render(); },
   'proj-archive'(el) { if (ui.openProject === el.dataset.id) ui.openProject = null; store.set('projects', el.dataset.id, { archived: true }); toast('보관했습니다.'); },
@@ -2522,6 +2604,31 @@ const actions = {
   },
   'pin-del'(el) { setPins(getPins().filter(p => p.id !== el.dataset.id)); pinTouch(); render(); },
   'restore-apply'() { restoreApply(); },
+  'area-filter'(el) { ui.areaFilter = el.dataset.id || ''; lsSet('planner.areaFilter.v1', ui.areaFilter); ui.editTask = null; render(); },
+  'area-add'() {
+    const inp = document.getElementById('area-new'), text = inp?.value.trim();
+    if (!text) { inp?.focus(); return; }
+    const used = new Set(areas().map(a => a.color)), color = AREA_COLORS.find(c => !used.has(c)) || AREA_COLORS[areas().length % AREA_COLORS.length];
+    setAreas([...areas(), { id: uid(), text, color }]);
+    render();
+  },
+  'sub-add'(el) {
+    const pid = el.dataset.id, inp = document.getElementById(`sub-new-${pid}`), text = inp?.value.trim();
+    if (!text) { inp?.focus(); return; }
+    setAreas([...areas(), { id: uid(), text, parent: pid }]);
+    render();
+    document.getElementById(`sub-new-${pid}`)?.focus();
+  },
+  'area-del'(el) {
+    const list = areas(), a = list.find(x => x.id === el.dataset.id);
+    if (!a) return;
+    const top = !a.parent;
+    if (top && topAreas(list).length <= 1) return toast('영역은 하나 이상 있어야 합니다.');
+    if (!confirm(`'${a.text}'${top ? ' 영역과 그 안의 세부 영역을' : '을(를)'} 지울까요? 이미 이 ${top ? '영역' : '세부 영역'}으로 정한 과제·프로젝트는 그대로 표시되고, 새로 고를 때만 목록에서 빠집니다.`)) return;
+    setAreas(list.map(x => (x.id === a.id || x.parent === a.id ? { ...x, archived: true } : x)));
+    if (ui.areaFilter === a.id) { ui.areaFilter = ''; lsSet('planner.areaFilter.v1', ''); }
+    render();
+  },
   'restore-cancel'() { ui.restore = null; render(); },
   'import-local'() {
     const n = store.importData(store.localBackup());
@@ -2647,7 +2754,7 @@ const actions = {
     toast('상시 연결을 끊었습니다.');
   },
   'cal-disconnect'() {
-    if (!confirm("캘린더 연결을 해제할까요? 구글 캘린더의 '학업 플래너' 캘린더는 그대로 남으니, 필요 없으면 구글 캘린더에서 직접 지워 주세요.")) return;
+    if (!confirm(`캘린더 연결을 해제할까요? 구글 캘린더의 플래너 캘린더는 그대로 남으니, 필요 없으면 구글 캘린더에서 직접 지워 주세요.`)) return;
     gcal.revoke();
     store.set('meta', 'calendar', { calendarId: null, synced: [], syncedAt: null });
     toast('캘린더 연결을 해제했습니다.');
@@ -2657,9 +2764,11 @@ const actions = {
     const date = el.dataset.date, inp = document.getElementById(`t-new-${date}`), text = inp?.value.trim();
     if (!text) { inp?.focus(); return; }
     const dueIn = document.getElementById(`t-new-due-${date}`), due = dueIn?.value || '';
+    const area = document.getElementById(`t-new-area-${date}`)?.value || defaultArea();
     inp.value = '';
     if (dueIn) dueIn.value = '';
-    setTasks(date, [...getTasks(date), { id: uid(), text, memo: '', cue: '', due, done: false, projectId: null, milestoneId: null }]);
+    lsSet(LA_KEY, area);
+    setTasks(date, [...getTasks(date), { id: uid(), text, area, memo: '', cue: '', due, done: false, projectId: null, milestoneId: null }]);
   },
   't-move'(el) {
     const { date, id } = el.dataset, list = [...getTasks(date)];
@@ -2748,6 +2857,13 @@ const actions = {
 };
 
 const changeActions = {
+  'tarea'(el) { lsSet(LA_KEY, el.value); updateTask(el.dataset.date, el.dataset.id, { area: el.value }); },
+  'parea'(el) { lsSet(LA_KEY, el.value); store.set('projects', el.dataset.id, { area: el.value }); },
+  'area-field'(el) {
+    const f = el.dataset.f, v = f === 'quiet' ? !el.checked : el.value.trim();
+    if (f === 'text' && !v) { render(); return; } // 이름을 비우면 원래대로
+    setAreas(areas().map(a => (a.id === el.dataset.id ? { ...a, [f]: v } : a)));
+  },
   'pin-check'(el) {
     setPins(getPins().map(p => (p.id === el.dataset.id ? { ...p, doneOn: el.checked ? todayStr() : '' } : p)));
     pinTouch(); render(); pipRefresh();

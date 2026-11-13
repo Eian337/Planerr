@@ -1,7 +1,7 @@
 {
-  "name": "학업 플래너",
-  "short_name": "플래너",
-  "description": "과제 하나를 정하고, 10분만 시작하는 학업 플래너",
+  "name": "Planerr",
+  "short_name": "Planerr",
+  "description": "학업·자기개발·여가를 한곳에서 — 할 일 하나를 정하고 10분만 시작하는 플래너",
   "lang": "ko",
   "start_url": "./",
   "scope": "./",
@@ -9,9 +9,26 @@
   "background_color": "#f5f2ec",
   "theme_color": "#2f5d50",
   "icons": [
-    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
-    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
-    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
   ]
 }
