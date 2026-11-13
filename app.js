@@ -12,7 +12,7 @@ import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timeta
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.15.0';
+const APP_VERSION = '1.16.0';
 const BASE_TITLE = 'Planerr';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -46,6 +46,9 @@ const mmss = (ms, ceil = false) => {
 const ui = {
   areaFilter: (() => { try { return localStorage.getItem('planner.areaFilter.v1') || ''; } catch { return ''; } })(), // 걸러 볼 영역(''면 전체)
   view: 'day',
+  statMode: 'week',  // 기록 화면: 'week' | 'month'
+  statAnchor: null,  // 기록 화면이 보여 주는 기간 안의 날짜(없으면 오늘)
+  logArea: null,     // 직접 기록 칸에 미리 골라 둘 영역(반복 목표의 '기록'에서)
   day: todayStr(),
   week: weekStart(todayStr()),
   month: todayStr().slice(0, 7),
@@ -285,7 +288,7 @@ function updateTimerDom() {
 const fmtT = s => `${Math.floor(s / 60)}:${pad(Math.floor(s % 60))}`;
 /* ───────── 음악: 플레이리스트(여러 개) ─────────
    플리·곡 정보는 Firebase로 기기 간 동기화되고, 음악 파일은 구글 드라이브를 거쳐 기기마다 받아 저장(오프라인 재생 가능)
-   재생기: 공부용(study), 공부 타이머 종료음(music), 알람 타이머 종료음(alarm2), 플리 미리 듣기용(preview) */
+   재생기: 공부용(study), 집중 타이머 종료음(music), 알람 타이머 종료음(alarm2), 플리 미리 듣기용(preview) */
 function musicTime(p, cur, dur) {
   if (p !== uiPlayer()) return;
   const ok = Number.isFinite(dur) && dur > 0;
@@ -301,7 +304,7 @@ const study = new Player({ onChange: () => scheduleRender(), onTime: (c, d) => m
 const preview = new Player({ onChange: () => scheduleRender(), onTime: (c, d) => musicTime(preview, c, d) });
 const alarm2 = new Player({ onChange: () => scheduleRender(), onTime: (c, d) => musicTime(alarm2, c, d) });
 
-// 공부 플리: 어느 타이머든 돌고 있을 때만 재생, 멈추면 같이 멈춤
+// 집중 플리: 어느 타이머든 돌고 있을 때만 재생, 멈추면 같이 멈춤
 const studyActive = () => mtRunning() || !!(timer && (timer.phase === 'warm' || timer.phase === 'flow'));
 function syncStudy() {
   if (studyActive() && preview.playing) preview.pause();
@@ -453,7 +456,7 @@ function mtFinish(silent = false) {
     study.pause();
     music.playAlarm().then(ok => { if (!ok) playMelody(); });
     const task = topTask(todayStr())?.text;
-    notify('⏰ 공부 타이머 종료', task ? `${task} — 설정한 시간이 됐어요.` : '설정한 시간이 됐어요.');
+    notify('⏰ 집중 타이머 종료', task ? `${task} — 설정한 시간이 됐어요.` : '설정한 시간이 됐어요.');
     try { navigator.vibrate?.([300, 150, 300]); } catch { /* 무시 */ }
   }
   mtSave(); scheduleRender(); pipRefresh();
@@ -463,16 +466,17 @@ function mtDismiss(record) {
   mtStopAlarm();
   calTimerRemove();
   const min = Math.round(mtSession() / 60000), date = mt.sessionDate || todayStr();
-  if (record && min >= 1) recordFocus(min, date);
+  if (record && min >= 1) recordFocus(min, date, document.getElementById('ov-area')?.value || mtArea());
   mtEndSession();
   mt.alarm = false;
   mtSave(); scheduleRender(); pipRefresh();
 }
 
-function recordFocus(min, date) {
-  const r = dayRec(date);
+function recordFocus(min, date, area, src = 'timer') {
+  const r = dayRec(date), ar = area || mtArea();
   store.set('days', date, { focusMin: (r.focusMin || 0) + min, started: true, ...(r.startedAt ? {} : { startedAt: Date.now() }) });
-  toast(`${min}분을 ${date === todayStr() ? '오늘' : fmtMD(date)} 집중 시간에 기록했습니다.`);
+  addLog(date, { area: ar, min, src });
+  toast(`${areaInfo(ar).label} ${min}분을 ${date === todayStr() ? '오늘' : fmtMD(date)} 기록에 넣었습니다.`);
 }
 
 function updateMainTimerDom() {
@@ -494,8 +498,8 @@ function updateTitle(startText) {
 }
 
 /* ───────── 알람 타이머 ─────────
-   공부와 상관없는 시간 재기(쉬는 시간, 빨래 등). 공부 타이머와 따로, 동시에 돌릴 수 있음
-   체크리스트·공부 플리·집중 시간 기록 없이, 끝나면 '알람 타이머 종료음' 플리(없으면 기본 알림음)가 울림 */
+   공부와 상관없는 시간 재기(쉬는 시간, 빨래 등). 집중 타이머와 따로, 동시에 돌릴 수 있음
+   체크리스트·집중 플리·집중 시간 기록 없이, 끝나면 '알람 타이머 종료음' 플리(없으면 기본 알림음)가 울림 */
 const AKEY = 'planner.atimer.v1';
 const AT_DEFAULT = 10 * 60000;
 const atFresh = () => ({ totalMs: AT_DEFAULT, remainMs: AT_DEFAULT, setMs: AT_DEFAULT, endTime: null, status: 'ready', alarm: false, calEventId: null });
@@ -578,7 +582,7 @@ function atFinish(silent = false) {
   if (silent) {
     calTimerRemove(atm);
   } else {
-    // 알람이 잘 들리도록 공부 플리·미리 듣기는 잠시 멈추고, 확인을 누르면 공부 플리를 다시 틂
+    // 알람이 잘 들리도록 집중 플리·미리 듣기는 잠시 멈추고, 확인을 누르면 집중 플리를 다시 틂
     study.pause();
     if (preview.playing) preview.pause();
     alarm2.playAlarm().then(ok => { if (!ok) playMelody(); });
@@ -831,7 +835,7 @@ function scheduleCalAuto() {
   }, 2500);
 }
 
-// 타이머 종료 시각도 캘린더에(권한이 살아 있고 온라인일 때만, 기기별). S: 공부 타이머(mt) 또는 알람 타이머(atm)
+// 타이머 종료 시각도 캘린더에(권한이 살아 있고 온라인일 때만, 기기별). S: 집중 타이머(mt) 또는 알람 타이머(atm)
 function calTimerUpsert(S = mt) {
   const A = S === atm, run = A ? atRunning() : mtRunning();
   if (!calConnected() || !calCanSend() || !navigator.onLine || !run || !S.endTime) return;
@@ -839,7 +843,7 @@ function calTimerUpsert(S = mt) {
   if (fresh) { S.calEventId = hexId(`${A ? 'ta' : 'tm'}|${deviceId}|${Date.now()}`); (A ? atSave : mtSave)(); }
   const base = eventsPath(calMeta().calendarId), st = S.endTime;
   const ev = {
-    id: S.calEventId, summary: A ? '⏰ 알람 타이머 종료' : '⏰ 공부 타이머 종료', description: `Planerr: ${PLANNER_URL}`,
+    id: S.calEventId, summary: A ? '⏰ 알람 타이머 종료' : '⏰ 집중 타이머 종료', description: `Planerr: ${PLANNER_URL}`,
     start: { dateTime: isoLocal(st), timeZone: TZ }, end: { dateTime: isoLocal(st + 5 * 60000), timeZone: TZ },
     reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 0 }] },
     extendedProperties: { private: { planner: '1', kind: 'timer', device: deviceId } },
@@ -886,11 +890,11 @@ async function trackUrl(id) {
   return u;
 }
 const openPl = () => plById(ui.plOpen) || plById(musicMeta().studyPl) || libPlaylists()[0] || null;
-// 화면의 재생 버튼이 다루는 재생기: 열어 둔 플리가 공부 플리면 공부용, 아니면 미리 듣기용
+// 화면의 재생 버튼이 다루는 재생기: 열어 둔 플리가 집중 플리면 공부용, 아니면 미리 듣기용
 function uiPlayer() { const p = openPl(); return p && p.id === musicMeta().studyPl ? study : preview; }
 function mpLocked() {
   if (uiPlayer() !== study || studyActive()) return false;
-  toast('공부 플리는 타이머가 돌 때만 재생됩니다.');
+  toast('집중 플리는 타이머가 돌 때만 재생됩니다.');
   return true;
 }
 
@@ -920,7 +924,7 @@ async function refreshPlayers() {
   }
 }
 
-// v1.7 이전에 이 기기에만 있던 알람 음악·공부 플리를 새 플리로 옮김(기기마다 한 번)
+// v1.7 이전에 이 기기에만 있던 알람 음악·집중 플리를 새 플리로 옮김(기기마다 한 번)
 let migrating = false;
 async function migrateLegacyMusic() {
   if (migrating) return;
@@ -1164,10 +1168,10 @@ function pipBuild() {
   let timerHtml;
   if (mt.alarm) {
     const min = Math.round(mtSession() / 60000);
-    timerHtml = `<div class="tm alarm"><div class="trow"><b>⏰ 공부 타이머 종료</b>${min >= 1 ? `<span class="tlabel">${min}분 집중</span>` : ''}</div>
+    timerHtml = `<div class="tm alarm"><div class="trow"><b>⏰ 집중 타이머 종료</b>${min >= 1 ? `<span class="tlabel">${min}분 집중</span>` : ''}</div>
       <div class="pills">${min >= 1 ? '<button class="pill main" id="pRec">기록하고 닫기</button><button class="pill" id="pNo">기록 없이</button>' : '<button class="pill main" id="pNo">확인</button>'}</div></div>`;
   } else if (mt.status === 'ready') {
-    timerHtml = `<div class="tm compact trow"><span class="tlabel">공부</span><span class="tnum" id="pt">${fmtClock(rem)}</span><span class="tbtns"><button class="rb main" id="pMain" title="시작">${ICON_PLAY}</button></span></div>`;
+    timerHtml = `<div class="tm compact trow"><span class="tlabel">집중</span><span class="tnum" id="pt">${fmtClock(rem)}</span><span class="tbtns"><button class="rb main" id="pMain" title="시작">${ICON_PLAY}</button></span></div>`;
   } else {
     timerHtml = `<div class="tm"><div class="bar ${mt.status === 'done' ? 'done' : ''}"><i id="pbar" style="width:${(ratio * 100).toFixed(2)}%"></i></div>
       <div class="trow"><span class="tnum" id="pt">${fmtClock(rem)}</span><span class="tlabel" id="ps">${MT_LABEL[mt.status]}</span>
@@ -1270,6 +1274,7 @@ const ICON = {
   week: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="15" rx="2.5"/><path d="M3 10h18M8 3v4M16 3v4M7 14.5h10"/></svg>',
   month: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="15" rx="2.5"/><path d="M3 10h18M8 3v4M16 3v4M7.5 13.5h.01M12 13.5h.01M16.5 13.5h.01M7.5 17h.01M12 17h.01"/></svg>',
   projects: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4M5 4h11.5l-2.2 3.8 2.2 3.8H5"/></svg>',
+  stats: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16M7 16.5v-5M12 16.5V6.5M17 16.5v-8"/></svg>',
   timer: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.8v3.9l2.4 1.8M9.5 2.8h5M12 2.8V6M18.3 6.8l1.4-1.4"/></svg>',
   settings: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
 };
@@ -1290,7 +1295,7 @@ function syncBadge(id = 'sync-badge') {
 function timerMini() {
   let html = '';
   if (timer && !(ui.view === 'day' && ui.day === todayStr())) html += `<button class="timer-mini" data-action="goto-day" data-date="${todayStr()}" aria-label="시작 타이머로 이동"><span id="timer-mini-text"></span></button>`;
-  if (mtRunning() && ui.view !== 'timer') html += `<button class="timer-mini alt" data-action="timer-goto" data-t="study" aria-label="공부 타이머로 이동"><span id="mt-mini-text">${fmtClock(mtRemain())}</span></button>`;
+  if (mtRunning() && ui.view !== 'timer') html += `<button class="timer-mini alt" data-action="timer-goto" data-t="study" aria-label="집중 타이머로 이동"><span id="mt-mini-text">${fmtClock(mtRemain())}</span></button>`;
   if (atRunning() && ui.view !== 'timer') html += `<button class="timer-mini alt2" data-action="timer-goto" data-t="alarm" aria-label="알람 타이머로 이동"><span aria-hidden="true">⏰</span><span id="at-mini-text">${fmtClock(atRemain())}</span></button>`;
   return html;
 }
@@ -1602,6 +1607,188 @@ function rowTags(date, t, isTop, editing) {
     + `${t.memo && !isTop && !editing ? `<small class="tr-memo">${esc(t.memo)}</small>` : ''}`;
 }
 
+/* ───────── 기록(활동 시간) ─────────
+   저장: days/{날짜}.lmap = { id: { text(메모), area, min, src, at } }
+   src: timer(집중 타이머) · start(시작 타이머) · manual(직접 기록) · check(반복 목표 '했음', 0분)
+   예전부터 쓰던 '집중 n분'(focusMin)은 타이머로 기록한 시간만 계속 더함.
+   영역 정보가 없는 예전 집중 시간 = focusMin − (타이머 기록 합) → 통계에서는 학업으로 셈 */
+const getLogs = d => listOfMap(dayRec(d).lmap);
+function setLogs(d, list) {
+  const tm = mapPatch(dayRec(d).lmap, list);
+  if (tm) store.patch('days', d, { lmap: tm });
+}
+function addLog(d, entry) { setLogs(d, [...getLogs(d), { id: uid(), text: '', at: Date.now(), ...entry }]); }
+const sumMin = list => list.reduce((a, l) => a + (Number(l.min) || 0), 0);
+const legacyMin = d => Math.max(0, (Number(dayRec(d).focusMin) || 0) - sumMin(getLogs(d).filter(l => l.src === 'timer' || l.src === 'start')));
+const SRC_LABEL = { timer: '집중 타이머', start: '시작 타이머', manual: '직접 기록', check: '했음' };
+const datesIn = (a, b) => { const out = []; for (let d = a; d <= b; d = addDays(d, 1)) out.push(d); return out; };
+// 기간 안의 기록 전체(예전 집중 시간은 학업 기록 한 줄로)
+function logsIn(a, b) {
+  const out = [];
+  for (const d of datesIn(a, b)) {
+    for (const l of getLogs(d)) out.push({ ...l, date: d });
+    const lg = legacyMin(d);
+    if (lg) out.push({ id: `legacy|${d}`, date: d, area: DEFAULT_AREA, min: lg, src: 'legacy', text: '' });
+  }
+  return out;
+}
+
+// 집중 타이머의 영역: 고른 영역 → 지금 할 과제의 영역 → 마지막으로 고른 영역
+function mtArea() {
+  if (mt.area && areas().some(a => a.id === mt.area && !a.archived)) return mt.area;
+  const top = topTask(todayStr());
+  return top ? itemArea(top) : defaultArea();
+}
+
+function logCard(date) {
+  const logs = getLogs(date), legacy = legacyMin(date), total = sumMin(logs) + legacy;
+  const rows = logs.map(l => `<li class="log-row">
+      ${areaTag(l)}
+      <span class="log-text">${esc(l.text || SRC_LABEL[l.src] || '기록')}</span>
+      <b class="log-min">${l.min ? fmtDur(Number(l.min)) : '✓'}</b>
+      <button class="icon-btn sm" data-action="log-del" data-date="${date}" data-id="${l.id}" aria-label="기록 지우기">×</button>
+    </li>`).join('');
+  return `<article class="card log-card">
+    <div class="card-head"><h2>${date === todayStr() ? '오늘 한 것' : '이 날 한 것'}</h2>${total ? `<span class="muted small">모두 ${fmtDur(total)}</span>` : ''}</div>
+    ${logs.length || legacy ? `<ul class="log-list">${rows}${legacy ? `<li class="log-row"><small class="area-tag" style="--ac:${areaInfo(DEFAULT_AREA).color}">${esc(areaInfo(DEFAULT_AREA).label)}</small><span class="log-text muted">영역 기록 전 집중 시간</span><b class="log-min">${fmtDur(legacy)}</b><span></span></li>` : ''}</ul>`
+      : `<p class="muted small">타이머로 집중한 시간은 자동으로 들어옵니다. 타이머 없이 한 것(작곡 40분, 게임 1시간 등)은 아래에서 직접 적으세요.</p>`}
+    <div class="add-row log-add">
+      <select id="log-area-${date}" class="area-in" aria-label="영역">${areaOptions(ui.logArea || defaultArea())}</select>
+      <input id="log-min-${date}" type="number" min="1" max="720" inputmode="numeric" placeholder="분" aria-label="몇 분" data-enter="log-add" data-date="${date}">
+      <input id="log-text-${date}" placeholder="메모 (선택)" maxlength="60" autocomplete="off" aria-label="메모" data-enter="log-add" data-date="${date}">
+      <button class="btn" data-action="log-add" data-date="${date}">기록</button>
+    </div>
+  </article>`;
+}
+
+/* ───────── 반복 목표 ─────────
+   저장: meta/goals.items = { id: { text, area, kind('days': 한 날 수 | 'min': 분), target, period('week' | 'day'), archived, o } }
+   진행은 기록에서 셈: 영역 목표면 그 안의 세부 영역 기록까지, 세부 영역 목표면 그 세부 영역만 */
+const allGoals = () => listOfMap(store.data.meta.goals?.items);
+const getGoals = () => allGoals().filter(g => !g.archived);
+function setGoals(list) {
+  const tm = mapPatch(store.data.meta.goals?.items, list);
+  if (tm) store.patch('meta', 'goals', { items: tm });
+}
+const GOAL_TYPES = [
+  ['wdays', '주 n회', { kind: 'days', period: 'week' }, '회'],
+  ['wmin', '주 n시간', { kind: 'min', period: 'week' }, '시간'],
+  ['dmin', '매일 n분', { kind: 'min', period: 'day' }, '분'],
+  ['daily', '매일 하기', { kind: 'days', period: 'day' }, ''],
+];
+const goalDesc = g => (g.kind === 'days' ? (g.period === 'day' ? '매일' : `주 ${g.target}회`) : g.period === 'day' ? `매일 ${g.target}분` : `주 ${+(g.target / 60).toFixed(1)}시간`);
+function goalMatch(g, l) {
+  if (l.src === 'check' && l.goal && l.goal !== g.id) return false; // '오늘 했음'은 그 목표에만
+  const gi = areaInfo(g.area), li = areaInfo(itemArea(l));
+  return gi.a.parent ? li.a.id === gi.a.id : li.top.id === gi.top.id;
+}
+function goalProgress(g) {
+  const t = todayStr(), [a, b] = g.period === 'day' ? [t, t] : [weekStart(t), addDays(weekStart(t), 6)];
+  const days = new Set();
+  let min = 0;
+  for (const l of logsIn(a, b)) if (goalMatch(g, l)) { days.add(l.date); min += Number(l.min) || 0; }
+  const val = g.kind === 'days' ? days.size : min;
+  return { val, target: g.target, pct: Math.min(100, Math.round((val / Math.max(1, g.target)) * 100)), done: val >= g.target, today: days.has(t) };
+}
+function goalRow(g, editable) {
+  const p = goalProgress(g), i = areaInfo(g.area);
+  const valText = g.kind === 'days' ? (g.period === 'day' ? (p.today ? '오늘 했음' : '오늘 아직') : `${p.val}/${g.target}회`) : `${fmtDur(p.val)} / ${fmtDur(g.target)}`;
+  const btn = editable
+    ? `<button class="icon-btn sm" data-action="rgoal-del" data-id="${g.id}" aria-label="${esc(g.text)} 목표 지우기">×</button>`
+    : g.kind === 'days'
+      ? (p.today ? '<span class="rg-ok">오늘 ✓</span>' : `<button class="chip-btn" data-action="rgoal-check" data-id="${g.id}">✓ 오늘 했음</button>`)
+      : `<button class="chip-btn" data-action="rgoal-log" data-id="${g.id}">기록</button>`;
+  return `<li class="rg ${p.done ? 'done' : ''}" style="--ac:${i.color}">
+    <div class="rg-top"><span class="rg-name"><b>${esc(g.text)}</b><small class="muted">${esc(i.full)} · ${goalDesc(g)}</small></span>${btn}</div>
+    <div class="rg-bar"><i style="width:${p.pct}%"></i></div>
+    <small class="rg-val">${valText}${p.done ? ' · 달성' : ''}</small>
+  </li>`;
+}
+function goalsCard(editable = false) {
+  const gs = getGoals();
+  if (!gs.length && !editable) return '';
+  return `<article class="card">
+    <div class="card-head"><h2>반복 목표</h2>${editable ? '' : `<button class="link-btn" data-action="nav" data-view="stats">편집</button>`}</div>
+    ${gs.length ? `<ul class="rg-list">${gs.map(g => goalRow(g, editable)).join('')}</ul>` : '<p class="muted small">\'주 3회 드럼\', \'주 5시간 작곡\', \'매일 30분 영어\'처럼 꾸준히 할 것을 정하면, 기록이 쌓이는 대로 진행이 채워집니다.</p>'}
+    ${editable ? `<div class="rg-add">
+      <input id="rg-text" placeholder="목표 이름 (예: 드럼 연습)" maxlength="40" autocomplete="off" aria-label="목표 이름">
+      <select id="rg-area" aria-label="영역">${areaOptions(defaultArea())}</select>
+      <select id="rg-type" aria-label="종류">${GOAL_TYPES.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
+      <input id="rg-n" type="number" min="1" max="600" value="3" inputmode="numeric" aria-label="횟수·시간·분">
+      <button class="btn primary" data-action="rgoal-add">추가</button>
+    </div>
+    <p class="muted small">'주 n회'와 '매일 하기'는 그 영역에 기록이 있는 날을 셉니다(오늘 화면의 '✓ 오늘 했음'으로도 채울 수 있음). 시간 목표는 타이머와 직접 기록한 시간을 더합니다.</p>` : ''}
+  </article>`;
+}
+
+/* ───────── 기록 화면(통계) ───────── */
+function statRange() {
+  const a = ui.statAnchor || todayStr();
+  if (ui.statMode === 'month') { const f = `${a.slice(0, 7)}-01`; const [y, m] = f.split('-').map(Number); return [f, ymd(new Date(y, m, 0))]; }
+  const ws = weekStart(a);
+  return [ws, addDays(ws, 6)];
+}
+function viewStats() {
+  const mode = ui.statMode === 'month' ? 'month' : 'week', [a, b] = statRange(), t = todayStr();
+  const logs = logsIn(a, b), list = areas();
+  const total = sumMin(logs);
+  // 영역별·세부 영역별 합계
+  const byTop = new Map(), bySub = new Map();
+  for (const l of logs) {
+    const i = areaInfo(itemArea(l)), m = Number(l.min) || 0;
+    byTop.set(i.top.id, (byTop.get(i.top.id) || 0) + m);
+    if (i.a.parent) bySub.set(i.a.id, (bySub.get(i.a.id) || 0) + m);
+  }
+  const tops = [...new Set([...topAreas(list).map(x => x.id), ...byTop.keys()])].map(id => areaInfo(id).top);
+  const maxTop = Math.max(1, ...byTop.values());
+  const areaRows = tops.map(top => {
+    const m = byTop.get(top.id) || 0, subs = list.filter(x => x.parent === top.id && (bySub.get(x.id) || !x.archived));
+    const subRows = subs.filter(s => bySub.get(s.id)).map(s => `<li class="st-sub"><span>${esc(s.text)}</span><span class="st-bar"><i style="width:${(bySub.get(s.id) / maxTop) * 100}%;background:${s.color || top.color}"></i></span><b>${fmtDur(bySub.get(s.id))}</b></li>`).join('');
+    return `<li class="st-row" style="--ac:${top.color || '#888888'}">
+      <span class="st-name">${esc(top.emoji || '')} ${esc(top.text)}</span>
+      <span class="st-bar"><i style="width:${(m / maxTop) * 100}%"></i></span>
+      <b>${m ? fmtDur(m) : '–'}</b><small class="muted">${total ? Math.round((m / total) * 100) : 0}%</small>
+      ${subRows ? `<ul class="st-subs">${subRows}</ul>` : ''}
+    </li>`;
+  }).join('');
+  // 날짜별 막대(영역별로 쌓음)
+  const days = datesIn(a, b), dayTot = days.map(d => sumMin(logs.filter(l => l.date === d)));
+  const maxDay = Math.max(30, ...dayTot);
+  const bars = days.map((d, k) => {
+    const segs = tops.map(top => { const m = sumMin(logs.filter(l => l.date === d && areaInfo(itemArea(l)).top.id === top.id)); return m ? `<i style="height:${(m / maxDay) * 100}%;background:${top.color || '#888888'}" title="${esc(top.text)} ${fmtDur(m)}"></i>` : ''; }).join('');
+    const lab = mode === 'week' ? DOW[parse(d).getDay()] : (parse(d).getDate() % 5 === 1 || d === b ? parse(d).getDate() : '');
+    return `<div class="sd ${d === t ? 'today' : ''}" title="${fmtMD(d)} · ${fmtDur(dayTot[k])}"><span class="sd-bar">${segs}</span><small>${lab}</small></div>`;
+  }).join('');
+  // 끝낸 과제(영역별)
+  const doneBy = new Map();
+  let doneN = 0;
+  for (const d of days) for (const tk of getTasks(d)) if (tk.done) { doneN++; const id = areaInfo(itemArea(tk)).top.id; doneBy.set(id, (doneBy.get(id) || 0) + 1); }
+  const activeDays = days.filter((d, k) => dayTot[k] > 0).length;
+  const isCur = a <= t && t <= b;
+  const title = mode === 'week' ? `${fmtMD(a)} – ${fmtMD(b)}` : `${a.slice(0, 4)}년 ${Number(a.slice(5, 7))}월`;
+  return layoutView([
+    [dateHeader(title, isCur ? (mode === 'week' ? '이번 주' : '이번 달') : '', 'stat', !isCur, mode === 'week' ? '이번 주로' : '이번 달로'), 'full'],
+    [`<div class="seg stat-seg" role="tablist" aria-label="기간">
+      <button type="button" class="${mode === 'week' ? 'on' : ''}" data-action="stat-mode" data-m="week" role="tab" aria-selected="${mode === 'week'}">주</button>
+      <button type="button" class="${mode === 'month' ? 'on' : ''}" data-action="stat-mode" data-m="month" role="tab" aria-selected="${mode === 'month'}">달</button>
+    </div>`, 'full'],
+    [`<article class="card">
+      <div class="card-head"><h2>영역별 시간</h2><span class="muted small">모두 ${fmtDur(total)} · ${activeDays}일</span></div>
+      ${total ? `<ul class="st-list">${areaRows}</ul>` : '<p class="muted small">이 기간에 기록이 없습니다. 집중 타이머를 쓰거나 오늘 화면의 \'오늘 한 것\'에 직접 적으면 여기에 쌓입니다.</p>'}
+    </article>`, 'main'],
+    [`<article class="card">
+      <div class="card-head"><h2>날짜별</h2><span class="muted small">하루 최대 ${fmtDur(Math.max(...dayTot))}</span></div>
+      <div class="sd-chart ${mode}">${bars}</div>
+      <div class="st-legend">${tops.filter(x => byTop.get(x.id)).map(x => `<span style="--ac:${x.color || '#888888'}"><i></i>${esc(x.text)}</span>`).join('')}</div>
+    </article>`, 'main'],
+    [goalsCard(true), 'side'],
+    [`<article class="card">
+      <div class="card-head"><h2>끝낸 과제</h2><span class="muted small">${doneN}개</span></div>
+      ${doneN ? `<ul class="st-done">${tops.filter(x => doneBy.get(x.id)).map(x => `<li style="--ac:${x.color || '#888888'}"><i></i><span>${esc(x.emoji || '')} ${esc(x.text)}</span><b>${doneBy.get(x.id)}개</b></li>`).join('')}</ul>` : '<p class="muted small">이 기간에 끝낸 과제가 없습니다.</p>'}
+    </article>`, 'side'],
+  ], 'stats-view');
+}
+
 /* ───────── 시간표 ───────── */
 function timelineCard(date) {
   const R = routineOf(settings().routine), rec = dayRec(date), off = !!rec.routineOff;
@@ -1691,7 +1878,7 @@ function checklistOverlay() {
 function checklistCard() {
   const C = checklistSet();
   return `<article class="card">
-    <div class="card-head"><h2>공부 시작 체크리스트</h2></div>
+    <div class="card-head"><h2>시작 체크리스트</h2></div>
     <label class="check"><input type="checkbox" data-cl="on" ${C.on ? 'checked' : ''}><span>시작할 때마다 체크리스트 띄우기 <small class="muted">(시작 타이머·타이머 탭·'타이머 없이 시작했어요')</small></span></label>
     <ul class="cl-edit">${C.items.map((it, i) => `<li><input data-cl="item" data-i="${i}" data-key="cl|${i}" value="${esc(it)}" maxlength="60" aria-label="체크리스트 항목"><button type="button" class="icon-btn sm" data-action="cl-del" data-i="${i}" aria-label="항목 삭제">×</button></li>`).join('')}</ul>
     <div class="add-row tight"><input id="cl-new" data-enter="cl-add" placeholder="항목 추가" maxlength="60" autocomplete="off" aria-label="체크리스트 항목 추가"><button type="button" class="btn sm" data-action="cl-add">추가</button></div>
@@ -1778,6 +1965,8 @@ function viewDay() {
       <div class="card-head"><h2>내일 과제 정하기</h2><span class="muted small">${fmtMDW(tomorrow)}</span></div>
       ${taskBlock(tomorrow)}
     </article>` : '', 'main'],
+    [logCard(s), 'side'],
+    [isToday ? goalsCard() : '', 'side'],
     [upcomingCard(s), 'side'],
     [weekGoalsMini(s), 'side'],
   ], 'day-view');
@@ -1949,7 +2138,8 @@ function viewProjects() {
 function offerCard() {
   const o = mt.offer;
   return `<article class="card offer">
-    <p><b>${o.min}분</b> 집중했습니다. ${o.date === todayStr() ? '오늘' : fmtMD(o.date)} 집중 시간에 기록할까요?</p>
+    <p><b>${o.min}분</b> 집중했습니다. ${o.date === todayStr() ? '오늘' : fmtMD(o.date)} 기록에 넣을까요?</p>
+    <label class="field inline"><span>영역</span><select id="offer-area">${areaOptions(mtArea())}</select></label>
     <div class="btn-row tight"><button class="btn primary" data-action="mt-record">기록</button><button class="btn" data-action="mt-norecord">기록 안 함</button></div>
   </article>`;
 }
@@ -1961,12 +2151,12 @@ function trackStatus(t) {
 
 function musicCard() {
   const open = ui.musicOpen, m = musicMeta(), pls = libPlaylists(), pl = openPl();
-  const head = `<button class="music-head" data-action="music-open" aria-expanded="${open}"><span aria-hidden="true">🎵</span><b>음악</b><span class="muted small">${pls.length ? `플리 ${pls.length}개` : '플리 없음'}${study.playing ? ' · 공부 플리 재생 중' : preview.playing ? ' · 듣는 중' : ''}</span><i class="chev">${open ? '−' : '+'}</i></button>`;
+  const head = `<button class="music-head" data-action="music-open" aria-expanded="${open}"><span aria-hidden="true">🎵</span><b>음악</b><span class="muted small">${pls.length ? `플리 ${pls.length}개` : '플리 없음'}${study.playing ? ' · 집중 플리 재생 중' : preview.playing ? ' · 듣는 중' : ''}</span><i class="chev">${open ? '−' : '+'}</i></button>`;
   if (!open) return `<article class="card music">${head}</article>`;
   const opt = (sel, none) => `<option value="">${none}</option>${pls.map(p => `<option value="${p.id}" ${sel === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}`;
   const roles = `<div class="pl-roles">
-      <label class="field inline"><span>공부할 때</span><select data-change="pl-role" data-role="studyPl" data-key="pl-role|studyPl" aria-label="공부할 때 틀 플리">${opt(m.studyPl, '안 틀기')}</select></label>
-      <label class="field inline"><span>공부 타이머 종료</span><select data-change="pl-role" data-role="alarmPl" data-key="pl-role|alarmPl" aria-label="공부 타이머가 끝날 때 울릴 플리">${opt(m.alarmPl, '기본 알림음')}</select></label>
+      <label class="field inline"><span>집중할 때</span><select data-change="pl-role" data-role="studyPl" data-key="pl-role|studyPl" aria-label="집중할 때 틀 플리">${opt(m.studyPl, '안 틀기')}</select></label>
+      <label class="field inline"><span>집중 타이머 종료</span><select data-change="pl-role" data-role="alarmPl" data-key="pl-role|alarmPl" aria-label="집중 타이머가 끝날 때 울릴 플리">${opt(m.alarmPl, '기본 알림음')}</select></label>
       <label class="field inline"><span>알람 타이머 종료</span><select data-change="pl-role" data-role="alarm2Pl" data-key="pl-role|alarm2Pl" aria-label="알람 타이머가 끝날 때 울릴 플리">${opt(m.alarm2Pl, '기본 알림음')}</select></label>
     </div>`;
   const w = driveWork(), pending = w.up.length || w.down.length || w.del.length;
@@ -1975,11 +2165,11 @@ function musicCard() {
     : `<div class="drive-line"><span class="muted small">☁ ${driveBusy ? esc(ui.musicProgress || '드라이브와 주고받는 중…')
         : pending ? [w.up.length && `올릴 곡 ${w.up.length}`, w.down.length && `받을 곡 ${w.down.length}`, w.del.length && `정리할 파일 ${w.del.length}`].filter(Boolean).join(' · ')
         : '모든 기기와 맞춰져 있음'}</span>${pending && !driveBusy ? `<button type="button" class="btn sm" data-action="drive-sync">${gcal.hasScope(DRIVE_SCOPE) ? '지금 주고받기' : '드라이브 연결'}</button>` : ''}</div>`;
-  const chips = `<div class="pl-chips">${pls.map(p => `<button type="button" class="pl-chip ${pl && p.id === pl.id ? 'on' : ''}" data-action="pl-open" data-pl="${p.id}">${esc(p.name)}${p.id === m.studyPl ? '<small>공부</small>' : ''}${p.id === m.alarmPl ? '<small>공부 종료</small>' : ''}${p.id === m.alarm2Pl ? '<small>알람 종료</small>' : ''}</button>`).join('')}</div>
+  const chips = `<div class="pl-chips">${pls.map(p => `<button type="button" class="pl-chip ${pl && p.id === pl.id ? 'on' : ''}" data-action="pl-open" data-pl="${p.id}">${esc(p.name)}${p.id === m.studyPl ? '<small>집중</small>' : ''}${p.id === m.alarmPl ? '<small>집중 종료</small>' : ''}${p.id === m.alarm2Pl ? '<small>알람 종료</small>' : ''}</button>`).join('')}</div>
     <div class="add-row tight"><input id="pl-new-name" data-enter="pl-new" placeholder="새 플리 이름" maxlength="40" autocomplete="off" aria-label="새 플리 이름"><button type="button" class="btn sm" data-action="pl-new">플리 만들기</button></div>`;
   if (!pl) {
     return `<article class="card music">${head}<div class="music-body">${roles}${driveLine}${chips}
-      <p class="muted small">플리를 만들고 곡을 추가하세요. 만든 플리는 '공부할 때', '공부 타이머 종료', '알람 타이머 종료'에 골라 쓸 수 있고, 모든 기기에서 같은 플리를 씁니다.</p></div></article>`;
+      <p class="muted small">플리를 만들고 곡을 추가하세요. 만든 플리는 '집중할 때', '집중 타이머 종료', '알람 타이머 종료'에 골라 쓸 수 있고, 모든 기기에서 같은 플리를 씁니다.</p></div></article>`;
   }
   const P = uiPlayer(), isStudy = pl.id === m.studyPl, locked = isStudy && !studyActive();
   const items = (pl.items || []).map(id => trackById(id)).filter(Boolean);
@@ -2007,7 +2197,7 @@ function musicCard() {
         <button type="button" class="btn sm" data-action="pl-repeat" data-pl="${pl.id}">${pl.repeat !== false ? '반복 켜짐' : '반복 꺼짐'}</button>
         <button type="button" class="btn sm danger" data-action="pl-del" data-pl="${pl.id}">플리 삭제</button>
       </div>
-      ${isStudy ? '<p class="muted small">공부할 때 쓰는 플리라 공부 타이머나 시작 타이머가 돌 때만 재생되고, 멈추면 같이 멈춥니다. 알람 타이머와는 상관없습니다.</p>' : ''}
+      ${isStudy ? '<p class="muted small">집중할 때 쓰는 플리라 집중 타이머나 시작 타이머가 돌 때만 재생되고, 멈추면 같이 멈춥니다. 알람 타이머와는 상관없습니다.</p>' : ''}
       <div class="btn-row tight wrap">
         <label class="btn sm file-btn">+ 파일 추가<input type="file" id="pl-file" data-pl="${pl.id}" accept="audio/*" multiple hidden></label>
         <button type="button" class="btn sm ${ui.libPick ? 'primary' : ''}" data-action="lib-pick">+ 전체 곡에서</button>
@@ -2021,7 +2211,7 @@ function musicCard() {
           <button class="round-btn main sm" data-action="mp-toggle" ${locked ? 'disabled' : ''} aria-label="재생/일시정지">${P.playing ? ICON_PAUSE : ICON_PLAY}</button>
           <button class="round-btn sm" data-action="mp-next" ${locked ? 'disabled' : ''} aria-label="다음 곡">⏭</button>
         </div>
-        <div class="now">${locked ? '공부 타이머가 돌 때 재생됩니다' : P.cur >= 0 && P.list[P.cur] ? esc(P.list[P.cur].name) : '트랙 없음'}</div>
+        <div class="now">${locked ? '집중 타이머가 돌 때 재생됩니다' : P.cur >= 0 && P.list[P.cur] ? esc(P.list[P.cur].name) : '트랙 없음'}</div>
         <input type="range" id="mp-seek" min="0" max="1000" value="0" aria-label="재생 위치">
         <div class="time-row"><span id="mp-cur">0:00</span><span id="mp-dur">0:00</span></div>
       </div>` : ''}
@@ -2032,7 +2222,7 @@ function musicCard() {
   </div></article>`;
 }
 
-// 공부 타이머(mt)와 알람 타이머(atm)는 같은 모양을 씀. 공부 타이머의 id(mt-…)는 예전 그대로
+// 집중 타이머(mt)와 알람 타이머(atm)는 같은 모양을 씀. 집중 타이머의 id(mt-…)는 예전 그대로
 function timerFace(kind) {
   const S = kind === 'study', st = S ? mt : atm, pre = S ? 'mt' : 'at';
   const run = S ? mtRunning() : atRunning(), rem = S ? mtRemain() : atRemain(), ratio = st.totalMs > 0 ? rem / st.totalMs : 0;
@@ -2065,15 +2255,16 @@ function viewTimer() {
       <div class="vtitle"><h1>타이머</h1><span class="sub">${task ? `오늘: ${esc(task)}` : '오늘 과제를 정하면 여기와 미션 창에 표시됩니다'}</span></div>
       ${pipOk ? `<button class="btn ${pipWin ? 'primary' : ''}" data-action="mt-pip">${pipWin ? '미션 창 닫기' : '미션 창'}</button>` : ''}
     </header>`, 'full'], [`<div class="seg timer-seg" role="tablist" aria-label="타이머 종류">
-      ${segBtn('study', '📚 공부', mtRunning(), mtRemain(), 'mt-seg')}
+      ${segBtn('study', '🎯 집중', mtRunning(), mtRemain(), 'mt-seg')}
       ${segBtn('alarm', '⏰ 알람', atRunning(), atRemain(), 'at-seg')}
     </div>
     ${tab === 'study' ? `${mt.offer ? offerCard() : ''}
     <article class="card mt-card">
+      <label class="field inline mt-area"><span>영역</span><select data-change="mt-area" data-key="mt-area" aria-label="집중 타이머 영역">${areaOptions(mtArea())}</select></label>
       ${timerFace('study')}
     </article>` : `<article class="card mt-card at-card">
       ${timerFace('alarm')}
-      <p class="muted small center">집중 시간 기록·공부 플리 없이 시간만 잽니다. 끝나면 ${a2 ? `'${esc(a2.name)}' 플리가` : '기본 알림음이'} 울립니다.</p>
+      <p class="muted small center">집중 시간 기록·집중 플리 없이 시간만 잽니다. 끝나면 ${a2 ? `'${esc(a2.name)}' 플리가` : '기본 알림음이'} 울립니다.</p>
     </article>`}`, 'main'], [musicCard(), 'side']], 'timer-view');
 }
 
@@ -2090,11 +2281,12 @@ function atAlarmOverlay() {
 function alarmOverlay() {
   if (!mt.alarm) return '';
   const min = Math.round(mtSession() / 60000);
-  return `<div class="alarm-ov" role="alertdialog" aria-label="공부 타이머 종료"><div class="alarm-box">
+  return `<div class="alarm-ov" role="alertdialog" aria-label="집중 타이머 종료"><div class="alarm-box">
     <div class="alarm-icon" aria-hidden="true">⏰</div>
-    <b>공부 타이머 종료</b>
+    <b>집중 타이머 종료</b>
     ${min >= 1
-      ? `<p class="muted">이번에 ${min}분 집중했습니다. 집중 시간에 기록할까요?</p>
+      ? `<p class="muted">이번에 ${min}분 집중했습니다. 기록에 넣을까요?</p>
+         <label class="field inline ov-area"><span>영역</span><select id="ov-area">${areaOptions(mtArea())}</select></label>
          <div class="btn-col"><button class="btn primary" data-action="mt-dismiss" data-rec="1">기록하고 닫기</button><button class="btn" data-action="mt-dismiss" data-rec="0">기록 없이 닫기</button></div>`
       : `<div class="btn-col"><button class="btn primary" data-action="mt-dismiss" data-rec="0">확인</button></div>`}
   </div></div>`;
@@ -2310,8 +2502,8 @@ function shell() {
   if (s.phase === 'error') return center(`<h1>열 수 없습니다</h1><p class="muted">${esc(s.error)}</p>`);
   if (s.phase === 'loading' || s.phase === 'syncing') return center(`<p class="muted">불러오는 중…</p>`);
   if (s.phase === 'login') return viewAuth();
-  const tabs = [['day', '오늘'], ['week', '주'], ['month', '달'], ['projects', '프로젝트'], ['timer', '타이머']];
-  const views = { day: viewDay, week: viewWeek, month: viewMonth, projects: viewProjects, timer: viewTimer, settings: viewSettings };
+  const tabs = [['day', '오늘'], ['week', '주'], ['month', '달'], ['projects', '프로젝트'], ['stats', '기록'], ['timer', '타이머']];
+  const views = { day: viewDay, week: viewWeek, month: viewMonth, projects: viewProjects, stats: viewStats, timer: viewTimer, settings: viewSettings };
   return `<div class="layout">
     <header class="topbar">
       <span class="brand">Planerr</span>
@@ -2504,7 +2696,8 @@ const actions = {
     gateStart(() => {
       ensureAudio();
       const t = todayStr();
-      timer = { date: t, phase: 'warm', warmMs: timerMin() * 60000, accMs: 0, segStart: Date.now() };
+      const top = topTask(t);
+      timer = { date: t, phase: 'warm', warmMs: timerMin() * 60000, accMs: 0, segStart: Date.now(), area: top ? itemArea(top) : defaultArea() };
       saveTimer();
       syncStudy();
       if (!dayRec(t).started) store.set('days', t, { started: true, startedAt: Date.now() });
@@ -2519,12 +2712,12 @@ const actions = {
   },
   'timer-stop'() {
     if (!timer) return;
-    const min = Math.round(elapsed() / 60000), d = timer.date;
+    const min = Math.round(elapsed() / 60000), d = timer.date, timer0 = timer;
     timer = null; saveTimer();
     syncStudy();
-    if (min > 0) store.set('days', d, { focusMin: (dayRec(d).focusMin || 0) + min });
+    if (min > 0) { store.set('days', d, { focusMin: (dayRec(d).focusMin || 0) + min }); addLog(d, { area: timer0.area || defaultArea(), min, src: 'start' }); }
     else render();
-    toast(min > 0 ? `${min}분을 기록했습니다.` : '시작한 것으로 기록했습니다.');
+    toast(min > 0 ? `${areaInfo(timer0.area || defaultArea()).label} ${min}분을 기록했습니다.` : '시작한 것으로 기록했습니다.');
   },
   'mark-started'() { gateStart(() => store.set('days', todayStr(), { started: true, startedAt: Date.now() })); },
 
@@ -2613,6 +2806,58 @@ const actions = {
   },
   'pin-del'(el) { setPins(getPins().filter(p => p.id !== el.dataset.id)); pinTouch(); render(); },
   'restore-apply'() { restoreApply(); },
+  'log-add'(el) {
+    const date = el.dataset.date, mIn = document.getElementById(`log-min-${date}`), min = Math.round(Number(mIn?.value));
+    if (!(min >= 1 && min <= 720)) { toast('몇 분 했는지 1~720 사이로 적어 주세요.'); mIn?.focus(); return; }
+    const area = document.getElementById(`log-area-${date}`)?.value || defaultArea(), text = document.getElementById(`log-text-${date}`)?.value.trim() || '';
+    lsSet(LA_KEY, area);
+    ui.logArea = null;
+    addLog(date, { area, min, text, src: 'manual' });
+    toast(`${areaInfo(area).label} ${fmtDur(min)}을 기록했습니다.`);
+  },
+  'log-del'(el) {
+    const { date, id } = el.dataset, l = getLogs(date).find(x => x.id === id);
+    if (!l) return;
+    if ((l.src === 'timer' || l.src === 'start') && Number(l.min)) {
+      // 타이머 기록을 지우면 '집중 n분'에서도 뺌(영역 없는 예전 시간으로 남지 않게)
+      store.set('days', date, { focusMin: Math.max(0, (Number(dayRec(date).focusMin) || 0) - Number(l.min)) });
+    }
+    setLogs(date, getLogs(date).filter(x => x.id !== id));
+  },
+  'rgoal-add'() {
+    const v = id => document.getElementById(id)?.value.trim() || '';
+    const text = v('rg-text'), area = v('rg-area') || defaultArea(), type = GOAL_TYPES.find(x => x[0] === v('rg-type')) || GOAL_TYPES[0];
+    const n = Number(v('rg-n'));
+    if (!text) { document.getElementById('rg-text')?.focus(); return; }
+    if (type[0] !== 'daily' && !(n > 0)) { toast('횟수나 시간을 적어 주세요.'); return; }
+    const target = type[0] === 'daily' ? 1 : type[0] === 'wmin' ? Math.round(n * 60) : Math.round(n);
+    setGoals([...allGoals(), { id: uid(), text, area, ...type[2], target }]);
+    render();
+  },
+  'rgoal-del'(el) {
+    const g = allGoals().find(x => x.id === el.dataset.id);
+    if (!g || !confirm(`'${g.text}' 목표를 지울까요? 쌓인 기록은 그대로 남습니다.`)) return;
+    setGoals(allGoals().map(x => (x.id === g.id ? { ...x, archived: true } : x)));
+  },
+  'rgoal-check'(el) {
+    const g = getGoals().find(x => x.id === el.dataset.id);
+    if (!g) return;
+    addLog(todayStr(), { area: g.area, min: 0, text: g.text, src: 'check', goal: g.id });
+    toast(`'${g.text}' 오늘 했음으로 기록했습니다.`);
+  },
+  'rgoal-log'(el) {
+    const g = getGoals().find(x => x.id === el.dataset.id);
+    if (!g) return;
+    ui.logArea = g.area;
+    render();
+    const inp = document.getElementById(`log-min-${todayStr()}`);
+    inp?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    inp?.focus();
+  },
+  'stat-mode'(el) { ui.statMode = el.dataset.m === 'month' ? 'month' : 'week'; render(); },
+  'stat-prev'() { const [a] = statRange(); ui.statAnchor = addDays(a, -1); render(); },
+  'stat-next'() { const [, b] = statRange(); ui.statAnchor = addDays(b, 1); render(); },
+  'stat-reset'() { ui.statAnchor = null; render(); },
   'area-filter'(el) { ui.areaFilter = el.dataset.id || ''; lsSet('planner.areaFilter.v1', ui.areaFilter); ui.editTask = null; render(); },
   'area-add'() {
     const inp = document.getElementById('area-new'), text = inp?.value.trim();
@@ -2801,7 +3046,7 @@ const actions = {
   'mt-add'() { mtAdd(60); },
   'mt-preset'(el) { mtPreset(Number(el.dataset.min)); },
   'mt-dismiss'(el) { mtDismiss(el.dataset.rec === '1'); },
-  'mt-record'() { if (!mt.offer) return; recordFocus(mt.offer.min, mt.offer.date); mt.offer = null; mtSave(); scheduleRender(); },
+  'mt-record'() { if (!mt.offer) return; recordFocus(mt.offer.min, mt.offer.date, document.getElementById('offer-area')?.value || mtArea()); mt.offer = null; mtSave(); scheduleRender(); },
   'mt-norecord'() { mt.offer = null; mtSave(); scheduleRender(); },
   'mt-pip'() { togglePip(); },
   'at-toggle'() { atToggle(); },
@@ -2866,6 +3111,7 @@ const actions = {
 };
 
 const changeActions = {
+  'mt-area'(el) { mt.area = el.value; mtSave(); },
   'tarea'(el) { lsSet(LA_KEY, el.value); updateTask(el.dataset.date, el.dataset.id, { area: el.value }); },
   'parea'(el) { lsSet(LA_KEY, el.value); store.set('projects', el.dataset.id, { area: el.value }); },
   'area-field'(el) {
