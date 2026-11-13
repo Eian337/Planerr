@@ -11,7 +11,7 @@ import { toMin, toHM, isoDow, routineOf, buildTimeline, taskEnd } from './timeta
 
 applyTheme(cachedTheme()); // 화면이 그려지기 전에 저장된 색을 먼저 적용
 
-const APP_VERSION = '1.13.0';
+const APP_VERSION = '1.13.1';
 const BASE_TITLE = '학업 플래너';
 const DEFAULT_STEPS = ['주제·범위 확정', '자료 조사·준비', '초안 작성', '수정·보완', '최종 점검'];
 const RING_C = 2 * Math.PI * 54;
@@ -2057,6 +2057,7 @@ function bridgeSetup() {
     <ol class="bridge-steps">
       <li><button class="btn sm" data-action="bridge-copy">코드 복사</button> <span class="muted small">비밀 값이 들어 있으니 다른 사람에게 보여 주지 마세요.</span></li>
       <li><a href="https://script.google.com/home/projects/create" target="_blank" rel="noopener">script.google.com에서 새 프로젝트</a>를 열고, 원래 있던 내용을 모두 지운 뒤 붙여 넣고 저장(💾)합니다.</li>
+      <li>왼쪽 <b>서비스</b> 옆 <b>+</b>를 눌러 <b>Google Calendar API</b>를 추가하고 저장합니다. 이걸 해야 스크립트가 캘린더 API를 쓸 수 있습니다.</li>
       <li>위쪽 함수 목록에서 <b>setup</b>을 고르고 <b>실행</b> → 권한 검토 → 계정 선택 → '고급' → '…(으)로 이동(안전하지 않음)' → 허용. 직접 만든 스크립트라 확인되지 않은 앱으로 표시됩니다.</li>
       <li><b>배포 → 새 배포</b> → 유형 선택(톱니)에서 <b>웹 앱</b> → 다음 사용자 인증 정보로 실행: <b>나</b>, 액세스 권한이 있는 사용자: <b>모든 사용자</b> → 배포 → 나온 <b>웹 앱 URL</b>을 복사합니다.</li>
       <li>아래 칸에 붙여 넣고 연결 확인을 누릅니다.</li>

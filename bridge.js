@@ -40,8 +40,9 @@ export function scriptCode(secret) {
   return `// Planerr 캘린더 다리 (Google Apps Script)
 // Planerr가 보낸 일정 목록에 맞춰 Planerr 전용 캘린더만 고칩니다. 원래 쓰던 다른 캘린더에는 손대지 않습니다.
 // 이 코드는 Planerr 설정에서 복사한 그대로 쓰세요(아래 SECRET은 Planerr와 맞춰져 있습니다).
-// 1) 위쪽 함수 목록에서 setup 을 골라 실행 → 권한 허용
-// 2) 배포 → 새 배포 → 유형: 웹 앱, 실행: 나, 액세스 권한: 모든 사용자 → 배포 → 웹 앱 URL을 Planerr 설정에 붙여 넣기
+// 1) 왼쪽 '서비스' 옆 + → Google Calendar API 추가 → 저장(스크립트가 캘린더 API를 쓰려면 필요)
+// 2) 위쪽 함수 목록에서 setup 을 골라 실행 → 권한 허용
+// 3) 배포 → 새 배포 → 유형: 웹 앱, 실행: 나, 액세스 권한: 모든 사용자 → 배포 → 웹 앱 URL을 Planerr 설정에 붙여 넣기
 
 var SECRET = '${secret}';
 var API = 'https://www.googleapis.com/calendar/v3';
